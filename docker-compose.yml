@@ -1,0 +1,15 @@
+services:
+  workspace:
+    build: .
+    image: 008-workspace
+    ports:
+      - "9000:9000"
+    volumes:
+      - workspace-data:/app/data
+    restart: unless-stopped
+    # Uncomment to start with sample data on an empty database:
+    # environment:
+    #   DEMO: "1"
+
+volumes:
+  workspace-data:

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>008 Workspace</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script src="theme.js"></script>
+</head>
+<body>
+<div class="app auth" id="app">
+  <aside class="side" id="side"></aside>
+  <div class="main">
+    <div class="topbar">
+      <button class="btn ghost" data-act="menu" aria-label="Open menu">Menu</button>
+      <span class="logo">008</span>
+    </div>
+    <main class="page" id="page"></main>
+  </div>
+</div>
+
+<div class="ov" id="ov-pal"><div class="dlg pal" role="dialog" aria-label="Search">
+  <input id="pal-in" placeholder="Search issues, pages, actions" autocomplete="off">
+  <ul id="pal-list"></ul>
+</div></div>
+<div class="ov" id="ov-modal"><div class="dlg" id="modal" role="dialog"></div></div>
+<div id="toast" role="status"></div>
+
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,554 @@
+{
+ "team": {
+  "num": "32008",
+  "short": "008",
+  "name": "Innovators",
+  "season": "2026–27",
+  "logo": null
+ },
+ "budget": 1500,
+ "people": [
+  {
+   "id": "jc",
+   "name": "Joseph",
+   "role": "Captain, programming lead",
+   "hue": 232
+  },
+  {
+   "id": "mk",
+   "name": "Mika",
+   "role": "Programming",
+   "hue": 165
+  },
+  {
+   "id": "ln",
+   "name": "Lin",
+   "role": "Programming",
+   "hue": 28
+  },
+  {
+   "id": "dv",
+   "name": "Dev",
+   "role": "Build lead",
+   "hue": 350
+  },
+  {
+   "id": "tm",
+   "name": "Tomas",
+   "role": "Build",
+   "hue": 48
+  },
+  {
+   "id": "an",
+   "name": "Ana",
+   "role": "Electronics",
+   "hue": 192
+  },
+  {
+   "id": "sm",
+   "name": "Sam",
+   "role": "Build and CAD",
+   "hue": 285
+  },
+  {
+   "id": "rh",
+   "name": "Rhea",
+   "role": "Notebook",
+   "hue": 312
+  },
+  {
+   "id": "kf",
+   "name": "Kofi",
+   "role": "Outreach",
+   "hue": 100
+  }
+ ],
+ "milestones": [
+  {
+   "name": "Kickoff",
+   "date": "2026-09-12"
+  },
+  {
+   "name": "First drive",
+   "date": "2026-10-10"
+  },
+  {
+   "name": "Scrimmage",
+   "date": "2026-11-14"
+  },
+  {
+   "name": "Code freeze",
+   "date": "2026-11-29"
+  },
+  {
+   "name": "Qualifier",
+   "date": "2026-12-06",
+   "main": true
+  }
+ ],
+ "phases": [
+  {
+   "name": "Design",
+   "start": "2026-09-12",
+   "end": "2026-10-03"
+  },
+  {
+   "name": "Build",
+   "start": "2026-09-26",
+   "end": "2026-11-14"
+  },
+  {
+   "name": "Code",
+   "start": "2026-10-05",
+   "end": "2026-11-29"
+  },
+  {
+   "name": "Driver practice",
+   "start": "2026-10-19",
+   "end": "2026-12-05"
+  },
+  {
+   "name": "Outreach",
+   "start": "2026-10-12",
+   "end": "2026-11-22"
+  }
+ ],
+ "issues": [
+  {
+   "id": 38,
+   "title": "Square up the chassis and check diagonals",
+   "type": "build",
+   "sub": "drive",
+   "pri": "med",
+   "status": "done",
+   "who": [
+    "dv"
+   ],
+   "created": "2026-09-27",
+   "logged": false
+  },
+  {
+   "id": 39,
+   "title": "Assemble the mecanum drivetrain",
+   "type": "build",
+   "sub": "drive",
+   "pri": "high",
+   "status": "done",
+   "who": [
+    "dv",
+    "tm"
+   ],
+   "created": "2026-09-26",
+   "logged": true
+  },
+  {
+   "id": 40,
+   "title": "Tune drivetrain feedforward",
+   "type": "code",
+   "sub": "auto",
+   "pri": "med",
+   "status": "done",
+   "who": [
+    "mk"
+   ],
+   "created": "2026-10-12",
+   "logged": false,
+   "branch": "auto/ff-tuning",
+   "merged": true
+  },
+  {
+   "id": 41,
+   "title": "Odometry pods drift about 3 cm over a 3-tile run",
+   "type": "code",
+   "sub": "auto",
+   "pri": "med",
+   "status": "doing",
+   "who": [
+    "mk"
+   ],
+   "created": "2026-10-16",
+   "due": "2026-10-28",
+   "branch": "fix/odometry-drift",
+   "desc": "After three tiles straight, the pose estimate is off by about 3 cm in x. Suspect the pod wheels slipping on the foam. Try a heavier spring and compare against the tape-measure ground truth.",
+   "notes": [
+    {
+     "who": "mk",
+     "text": "Logged 5 runs on Oct 21. Drift is worse going backwards. Looks like the left pod loses contact.",
+     "date": "2026-10-21"
+    }
+   ]
+  },
+  {
+   "id": 42,
+   "title": "Intake jams on angled pickups",
+   "type": "build",
+   "sub": "intake",
+   "pri": "high",
+   "status": "blocked",
+   "who": [
+    "dv"
+   ],
+   "created": "2026-10-18",
+   "due": "2026-10-30",
+   "blockedBy": "3 mm polycarbonate sheet for the new guide. Ordered Oct 20, arrives about Oct 28.",
+   "desc": "The game piece wedges against the left guide when approached at more than 20 degrees. A wider, smoother guide should let it self-center.",
+   "notes": []
+  },
+  {
+   "id": 43,
+   "title": "Lift string stretches after about 20 cycles",
+   "type": "build",
+   "sub": "lift",
+   "pri": "high",
+   "status": "todo",
+   "who": [
+    "tm"
+   ],
+   "created": "2026-10-19",
+   "due": "2026-11-02",
+   "desc": "Slide height at the top drifts by about a centimeter after a practice run. Swap to low-stretch cord and add a tensioner.",
+   "notes": []
+  },
+  {
+   "id": 44,
+   "title": "AprilTag pose flips beyond 1.5 m",
+   "type": "code",
+   "sub": "vision",
+   "pri": "med",
+   "status": "review",
+   "who": [
+    "jc"
+   ],
+   "created": "2026-10-17",
+   "due": "2026-10-26",
+   "branch": "vision/tag-filter",
+   "pr": 3,
+   "desc": "Beyond 1.5 m the solved pose sometimes mirrors. Reject frames whose reprojection error is over threshold and hold the last good pose.",
+   "notes": [
+    {
+     "who": "jc",
+     "text": "Filter is in. Need someone to review before it goes onto the robot.",
+     "date": "2026-10-22"
+    }
+   ]
+  },
+  {
+   "id": 45,
+   "title": "Re-crimp the loose XT30 battery connector",
+   "type": "build",
+   "sub": "electronics",
+   "pri": "high",
+   "status": "todo",
+   "who": [
+    "an"
+   ],
+   "created": "2026-10-21",
+   "due": "2026-10-25",
+   "desc": "The connector wiggles and the robot browned out once during Tuesday's practice. Needs new connectors, see Parts.",
+   "notes": []
+  },
+  {
+   "id": 46,
+   "title": "Bind lift presets to the d-pad",
+   "type": "code",
+   "sub": "teleop",
+   "pri": "low",
+   "status": "doing",
+   "who": [
+    "jc"
+   ],
+   "created": "2026-10-20",
+   "due": "2026-10-31",
+   "branch": "teleop/lift-presets",
+   "desc": "",
+   "notes": []
+  },
+  {
+   "id": 47,
+   "title": "Write the notebook entry on drivetrain selection",
+   "type": "notebook",
+   "sub": "notebook",
+   "pri": "med",
+   "status": "todo",
+   "who": [
+    "rh"
+   ],
+   "created": "2026-10-15",
+   "due": "2026-10-27",
+   "desc": "",
+   "notes": []
+  },
+  {
+   "id": 48,
+   "title": "Order two spare 312 rpm motors",
+   "type": "build",
+   "sub": "drive",
+   "pri": "med",
+   "status": "done",
+   "who": [
+    "sm"
+   ],
+   "created": "2026-10-09",
+   "logged": false
+  },
+  {
+   "id": 49,
+   "title": "Book the library demo day",
+   "type": "outreach",
+   "sub": "outreach",
+   "pri": "low",
+   "status": "todo",
+   "who": [
+    "kf"
+   ],
+   "created": "2026-10-20",
+   "due": "2026-11-08",
+   "desc": "",
+   "notes": []
+  },
+  {
+   "id": 50,
+   "title": "Three-piece auto from the left start",
+   "type": "code",
+   "sub": "auto",
+   "pri": "high",
+   "status": "doing",
+   "who": [
+    "ln"
+   ],
+   "created": "2026-10-14",
+   "due": "2026-11-07",
+   "branch": "auto/left-three",
+   "desc": "",
+   "notes": []
+  }
+ ],
+ "parts": [
+  {
+   "name": "312 rpm gear motor",
+   "sub": "drive",
+   "have": 4,
+   "need": 6,
+   "price": 44.99,
+   "ordered": 2,
+   "vendor": "goBILDA"
+  },
+  {
+   "name": "96 mm mecanum wheel",
+   "sub": "drive",
+   "have": 4,
+   "need": 4,
+   "price": 29,
+   "ordered": 0,
+   "vendor": "goBILDA"
+  },
+  {
+   "name": "Odometry pod",
+   "sub": "auto",
+   "have": 2,
+   "need": 3,
+   "price": 38,
+   "ordered": 0,
+   "vendor": "goBILDA"
+  },
+  {
+   "name": "3 mm polycarbonate sheet",
+   "sub": "intake",
+   "have": 0,
+   "need": 1,
+   "price": 18.5,
+   "ordered": 1,
+   "vendor": "Local supplier"
+  },
+  {
+   "name": "Low-stretch slide cord",
+   "sub": "lift",
+   "have": 0,
+   "need": 1,
+   "price": 12,
+   "ordered": 0,
+   "vendor": "goBILDA"
+  },
+  {
+   "name": "XT30 connector pair",
+   "sub": "electronics",
+   "have": 0,
+   "need": 10,
+   "price": 0.9,
+   "ordered": 0,
+   "vendor": "Amazon"
+  },
+  {
+   "name": "Control Hub",
+   "sub": "electronics",
+   "have": 1,
+   "need": 1,
+   "price": 299,
+   "ordered": 0,
+   "vendor": "REV"
+  },
+  {
+   "name": "Expansion Hub",
+   "sub": "electronics",
+   "have": 1,
+   "need": 1,
+   "price": 199,
+   "ordered": 0,
+   "vendor": "REV"
+  },
+  {
+   "name": "USB webcam",
+   "sub": "vision",
+   "have": 1,
+   "need": 1,
+   "price": 28,
+   "ordered": 0,
+   "vendor": "Amazon"
+  },
+  {
+   "name": "12 V battery",
+   "sub": "electronics",
+   "have": 3,
+   "need": 4,
+   "price": 49,
+   "ordered": 0,
+   "vendor": "REV"
+  }
+ ],
+ "practice": [
+  {
+   "date": "2026-10-08",
+   "driver": "dv",
+   "auto": 3,
+   "cycle": 41,
+   "note": "First full-field run. Intake jammed twice."
+  },
+  {
+   "date": "2026-10-10",
+   "driver": "jc",
+   "auto": 4,
+   "cycle": 38,
+   "note": ""
+  },
+  {
+   "date": "2026-10-14",
+   "driver": "dv",
+   "auto": 4,
+   "cycle": 36,
+   "note": "Brownout at 1:40."
+  },
+  {
+   "date": "2026-10-17",
+   "driver": "jc",
+   "auto": 6,
+   "cycle": 33,
+   "note": "New ff values helped a lot."
+  },
+  {
+   "date": "2026-10-19",
+   "driver": "dv",
+   "auto": 5,
+   "cycle": 34,
+   "note": "Odometry drift on the long leg."
+  },
+  {
+   "date": "2026-10-21",
+   "driver": "jc",
+   "auto": 7,
+   "cycle": 31,
+   "note": "Best session so far."
+  }
+ ],
+ "meetings": [
+  {
+   "id": "m3",
+   "date": "2026-10-25",
+   "title": "Build day",
+   "upcoming": true,
+   "who": [
+    "dv",
+    "tm",
+    "an",
+    "sm"
+   ],
+   "agenda": [
+    "Re-crimp battery connector",
+    "Fit new intake guide if the sheet arrives",
+    "Check lift string tension"
+   ],
+   "notes": "",
+   "actions": []
+  },
+  {
+   "id": "m2",
+   "date": "2026-10-21",
+   "title": "Programming sync",
+   "who": [
+    "jc",
+    "mk",
+    "ln"
+   ],
+   "agenda": [
+    "Odometry drift",
+    "Auto routes",
+    "Repo structure"
+   ],
+   "notes": "Agreed on one repo with a branch per feature and review before anything touches the robot. Lin owns the left-side autos, Mika owns localization.",
+   "actions": [
+    {
+     "id": "a1",
+     "text": "Set up the team repo and branch rules",
+     "who": "jc",
+     "issue": null
+    },
+    {
+     "id": "a2",
+     "text": "Write a localization test that runs on the field tape",
+     "who": "mk",
+     "issue": null
+    }
+   ]
+  },
+  {
+   "id": "m1",
+   "date": "2026-10-18",
+   "title": "Strategy review",
+   "who": [
+    "jc",
+    "dv",
+    "rh",
+    "kf",
+    "mk"
+   ],
+   "agenda": [
+    "Scoring priorities",
+    "Mechanism list",
+    "Outreach plan"
+   ],
+   "notes": "Decided to prioritize a reliable auto over a fast one. Notebook needs entries for every decision.",
+   "actions": [
+    {
+     "id": "a3",
+     "text": "Book the library demo day",
+     "who": "kf",
+     "issue": 49
+    }
+   ]
+  }
+ ],
+ "notebook": [
+  {
+   "id": "n1",
+   "date": "2026-10-03",
+   "title": "Drivetrain selection",
+   "issue": 39,
+   "author": "rh",
+   "status": "final",
+   "problem": "We needed a drivetrain that can strafe so we can line up on scoring zones without turning.",
+   "tried": "Compared tank, mecanum and swerve on weight, cost and how long it takes to build and code. Built a quick mecanum prototype on a spare plate.",
+   "result": "Mecanum is the best balance. Swerve scored higher in theory but would cost us three weeks.",
+   "next": "Assemble the full chassis and tune feedforward."
+  }
+ ],
+ "nextId": 51
+}
