@@ -13,7 +13,7 @@ COPY server ./server
 COPY public ./public
 
 # The database lives here. Mount a volume on it so data survives new containers.
-RUN mkdir -p /app/data && chown -R node:node /app/data
+RUN mkdir -p /app/data /app/config && chown -R node:node /app/data /app/config
 VOLUME /app/data
 
 USER node

@@ -82,7 +82,7 @@ export const SPECS = {
   phases: { name: str(100, true), start: date(true), end: date(true) },
   people: { name: str(60, true), role: str(80), hue: int(0, 359, false, 0), gh: str(39) },
   team: { num: str(12, true), name: str(60, true), short: str(8), season: str(20), logo: str(400_000) },
-  settings: { budget: num(0, 10_000_000, false, 0), branchPrefix: str(20), repo: str(100), autoPr: bool(true) },
+  settings: { budget: num(0, 10_000_000, false, 0), branchPrefix: str(20), repo: str(100), autoPr: bool(true), ai: bool(true) },
   /* Each person's own notification choices. */
   prefs: { due: bool(true), blocked: bool(true), mention: bool(true), pr: bool(true), digest: bool(false), follow: strs(SUBS.length, 20) },
 };

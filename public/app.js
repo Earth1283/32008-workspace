@@ -12,7 +12,7 @@
     toastTimer: null, g: 0,
     setTab: "profile", density: "comfortable", accent: "",
     prefs: { due: true, blocked: true, mention: true, pr: true, digest: false, follow: [] },
-    inbox: [], github: {}, autoPr: true, iboxTab: "you",
+    inbox: [], github: {}, autoPr: true, ask: false, aiOn: true, iboxTab: "you",
   };
   const ACCENTS = [["", "Steel blue", "#1A6FA8"], ["#38BDF8", "Sky", "#38BDF8"], ["#14B8A6", "Teal", "#14B8A6"], ["#22A06B", "Green", "#22A06B"],
     ["#E5A93B", "Amber", "#E5A93B"], ["#F07A3C", "Orange", "#F07A3C"], ["#E5484D", "Red", "#E5484D"], ["#8B9099", "Graphite", "#8B9099"]];
@@ -33,9 +33,9 @@
   const CLIENT = Math.random().toString(36).slice(2, 10);
   const pending = new Set();
 
-  async function call(method, url, body) {
+  async function call(method, url, body, signal) {
     const r = await fetch(url, {
-      method, credentials: "same-origin",
+      method, credentials: "same-origin", signal,
       headers: { "Content-Type": "application/json", "X-Client": CLIENT },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
@@ -130,7 +130,7 @@
   const soon = (key, fn, ms = 450) => { clearTimeout(timers.get(key)); timers.set(key, setTimeout(() => { timers.delete(key); fn(); }, ms)); };
   const persistSoon = (coll, doc) => soon(coll + doc.id, () => persist(coll, doc));
   const saveTeam = () => write("PUT", "/api/meta/team", F.team).catch(writeFailed);
-  const saveSettings = () => write("PUT", "/api/meta/settings", { budget: F.budget, branchPrefix: S.branchPrefix, repo: S.repo || "", autoPr: S.autoPr }).catch(writeFailed);
+  const saveSettings = () => write("PUT", "/api/meta/settings", { budget: F.budget, branchPrefix: S.branchPrefix, repo: S.repo || "", autoPr: S.autoPr, ai: S.aiOn }).catch(writeFailed);
   const saveMe = () => { const p = F.person(F.me); return write("PATCH", `/api/people/${F.me}`, { name: p.name, role: p.role, gh: p.gh || "" }).catch(writeFailed); };
   const savePrefs = () => write("PUT", "/api/prefs", S.prefs).catch(writeFailed);
   function markRead(ids) {
@@ -165,6 +165,8 @@
     S.branchPrefix = st.settings.branchPrefix || "ftc";
     S.repo = st.settings.repo || null;
     S.autoPr = st.settings.autoPr !== false;
+    S.ask = !!st.ask;
+    S.aiOn = st.settings.ai !== false;
     S.prefs = st.prefs;
     S.inbox = st.inbox;
     S.github = st.github || {};
@@ -876,7 +878,7 @@
       body = `<h2>Command center</h2><p class="dim">The Ctrl K box. Saved on this device.</p><div class="box" style="margin-top:16px">
         ${row("Style", preset === "custom" ? "Custom. Pick a preset to start over." : "Start from a preset, then adjust below.", segBtns("data-pal-preset", preset, [...PALETTE_PRESET_LABELS, ...(preset === "custom" ? [["custom", "Custom"]] : [])]))}
         ${row("When the box is empty", "What to list before you type anything.", segBtns("data-pal-empty", palette.config.empty, PALETTE_EMPTY_LABELS))}
-        ${PALETTE_TOGGLES.map(toggle).join("")}
+        ${PALETTE_TOGGLES.filter(([key]) => key !== "ai" || (S.ask && S.aiOn)).map(toggle).join("")}
       </div><div style="margin-top:14px"><button class="btn" data-act="palette">Try it</button></div>`;
     } else if (S.setTab === "notifications") {
       body = `<h2>Notifications</h2><p class="dim">These arrive in your <button class="linkish" data-go="inbox">inbox</button>. Saved to your account, so they apply on every device.</p><div class="box" style="margin-top:16px">
@@ -907,6 +909,11 @@
           : `<form class="avl" data-ghtoken><input class="in" type="password" name="token" placeholder="github_pat_…" autocomplete="off" aria-label="Access token" required style="width:160px"><button class="btn">Save</button></form>`) : ""}
         ${row("Branch prefix", "Suggested branch names start with this.", field("prefix", S.branchPrefix, "Branch prefix", "text", !admin, 'maxlength="20"'))}
         ${row("Move issues with pull requests", "Opening a PR sets In review. Merging sets Done. You can still change the status by hand.", tgl("autopr", "Move issues with pull requests", !admin, S.autoPr))}
+      </div>
+        <h3 class="sh">Ask the workspace</h3><div class="box">
+        ${row("Answer questions in the command center", S.ask
+          ? "Type a question starting with what's in Ctrl K. After a pause, Google's Gemini model answers from issue titles, people, parts, practice runs, meetings and dates. Comments, descriptions and notebook text are never sent."
+          : "Add GEMINI_API_KEY to the server's .env file and restart. See .env.example. Use a key from a billing-enabled Google project.", S.ask ? tgl("ai", "Answer questions in the command center", !admin, S.aiOn) : "")}
       </div>`;
     }
     return `<div class="ph"><h1>Settings</h1></div>
@@ -1125,10 +1132,10 @@
   const PALETTE_PROMPT = "Type a command, or search";
   const PALETTE_SUGGESTIONS_SHOWN = { suggest: 6, both: 4, menu: 1 };
   const PALETTE_PRESETS = {
-    minimal: { ghost: true, empty: "suggest", chips: false, tokens: false, preview: false, recents: false, undo: true },
-    grammar: { ghost: true, empty: "menu", chips: true, tokens: true, preview: false, recents: false, undo: true },
-    context: { ghost: true, empty: "suggest", chips: false, tokens: false, preview: true, recents: true, undo: true },
-    mix: { ghost: true, empty: "both", chips: true, tokens: true, preview: true, recents: true, undo: true },
+    minimal: { ghost: true, empty: "suggest", chips: false, tokens: false, preview: false, recents: false, undo: true, ai: true },
+    grammar: { ghost: true, empty: "menu", chips: true, tokens: true, preview: false, recents: false, undo: true, ai: true },
+    context: { ghost: true, empty: "suggest", chips: false, tokens: false, preview: true, recents: true, undo: true, ai: true },
+    mix: { ghost: true, empty: "both", chips: true, tokens: true, preview: true, recents: true, undo: true, ai: true },
   };
   const PALETTE_DEFAULT_PRESET = "mix";
   const PALETTE_PRESET_LABELS = [["minimal", "Minimal"], ["grammar", "Grammar"], ["context", "Context"], ["mix", "Mix"]];
@@ -1140,13 +1147,14 @@
     ["preview", "Preview bar", "Shows the exact change before you press Enter."],
     ["recents", "Recent commands", "Lists the last few commands you ran when the box is empty."],
     ["undo", "Undo after running", "Offers to take a command back for a few seconds."],
+    ["ai", "Ask the workspace", "Type a question that starts with what's, like what's blocking the lift. After a pause, an AI model answers from the team's data."],
   ];
   const PALETTE_SLOT_NAMES = { pri: "priority", sub: "subsystem", accent: "color", role: "view" };
 
   const readStorage = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch (e) { return fallback; } };
   const writeStorage = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* storage unavailable */ } };
 
-  const palette = { engine: null, config: loadPaletteConfig(), result: null, rows: [], index: 0, chipsShown: new Set() };
+  const palette = { engine: null, config: loadPaletteConfig(), result: null, localRows: [], rows: [], index: 0, chipsShown: new Set(), ask: null };
 
   function loadPaletteConfig() {
     const base = PALETTE_PRESETS[PALETTE_DEFAULT_PRESET], stored = readStorage(PALETTE_CONFIG_KEY, {});
@@ -1200,12 +1208,13 @@
     const overlay = $("#ov-pal"), input = $("#pal-in");
     palette.engine = CMD.create(paletteEnvironment());
     palette.chipsShown.clear();
+    askCache.clear();
     arrive(overlay, ovRuns(overlay));
     input.value = "";
     paletteUpdate();
     input.focus();
   }
-  function closePalette() { const ov = $("#ov-pal"); leave(ov, ovRuns(ov)); }
+  function closePalette() { askCancel(); const ov = $("#ov-pal"); leave(ov, ovRuns(ov)); }
 
   function recentRows() {
     return readStorage(PALETTE_RECENT_KEY, []).map((text) => palette.engine.analyze(text).rows.find((row) => row.complete && row.text === text)).filter(Boolean);
@@ -1221,10 +1230,69 @@
     ];
   }
 
+  /* Ask the workspace: a question like "what's blocking the lift" goes to the server once typing pauses.
+     The answer arrives below the local matches, so it never moves the row Enter would run. */
+  const ASK_QUESTION = /^what(?:['\u2019]s|s| is| are)\s+\S/i;
+  const ASK_DEBOUNCE_MS = 1500;
+  const ASK_MIN_CHARS = 12;
+  const askCache = new Map();
+
+  function askCancel() {
+    const { ask } = palette;
+    palette.ask = null;
+    if (ask) { clearTimeout(ask.timer); if (ask.abort) ask.abort.abort(); }
+  }
+  function askSync() {
+    const text = $("#pal-in").value.trim().replace(/\s+/g, " ");
+    if (!(S.ask && S.aiOn && palette.config.ai) || text.length < ASK_MIN_CHARS || !ASK_QUESTION.test(text)) return askCancel();
+    if (palette.ask && palette.ask.text === text) return;
+    askCancel();
+    const hit = askCache.get(text.toLowerCase());
+    if (hit) { palette.ask = { text, state: "done", ...hit }; return; }
+    palette.ask = { text, state: "waiting", timer: setTimeout(() => askFetch(text), ASK_DEBOUNCE_MS) };
+  }
+  async function askFetch(text) {
+    const ask = palette.ask;
+    if (!ask || ask.text !== text) return;
+    ask.state = "thinking";
+    ask.abort = new AbortController();
+    paletteRefresh();
+    try {
+      const data = await call("POST", "/api/ask", { q: text }, ask.abort.signal);
+      if (palette.ask !== ask) return;
+      const result = { answer: data.answer, issues: data.issues.filter((id) => byId(id)) };
+      askCache.set(text.toLowerCase(), result);
+      Object.assign(ask, result, { state: "done" });
+    } catch (e) {
+      if (palette.ask !== ask) return;
+      if (e.status === 429) Object.assign(ask, { state: "done", answer: e.message, issues: [] });
+      else palette.ask = null;
+    }
+    paletteRefresh();
+  }
+  function askRows() {
+    const { ask } = palette;
+    if (!ask) return [];
+    if (ask.state === "waiting") return [{ ai: true, kind: "waiting", section: "Answer", label: "Ask the workspace", detail: "Answers when you stop typing" }];
+    if (ask.state === "thinking") return [{ ai: true, kind: "thinking", section: "Answer", label: "Looking through the workspace" }];
+    return [
+      { ai: true, kind: "answer", section: "Answer", label: ask.answer },
+      ...ask.issues.map((issue) => ({ ai: true, kind: "issue", issue, section: "From the answer", label: "FTC-" + issue })),
+    ];
+  }
+
   function paletteUpdate() {
     palette.result = palette.engine.analyze($("#pal-in").value);
-    palette.rows = paletteRowsFor(palette.result);
+    palette.localRows = paletteRowsFor(palette.result);
+    askSync();
+    palette.rows = [...palette.localRows, ...askRows()];
     palette.index = 0;
+    paletteDraw();
+  }
+  /** Redraw after an answer arrives, keeping the highlighted row where it was. */
+  function paletteRefresh() {
+    palette.rows = [...palette.localRows, ...askRows()];
+    palette.index = Math.min(palette.index, Math.max(0, palette.rows.length - 1));
     paletteDraw();
   }
 
@@ -1275,7 +1343,18 @@
     if (row.menu) return templateHtml(row);
     return row.complete || !row.label.endsWith(" \u2026") ? esc(row.label) : esc(row.label.slice(0, -2)) + " " + GAP_CHIP;
   }
+  function askRowHtml(row, k) {
+    const on = `role="option" id="pal-o-${k}" aria-label="${esc(row.label)}" aria-selected="${k === palette.index}" data-pi="${k}"`;
+    if (row.kind === "issue") {
+      const issue = byId(row.issue);
+      return `<li ${on} class="${k === palette.index ? "on" : ""}">${statusIcon(issue.status)}<b>FTC-${issue.id}</b><span class="d">${esc(issue.title)}</span><span class="r">${esc(F.status[issue.status])}</span></li>`;
+    }
+    const cls = `ai ai-${row.kind}${k === palette.index ? " on" : ""}`;
+    if (row.kind === "answer") return `<li ${on} class="${cls}"><span class="ai-text">${esc(row.label)}</span><span class="r">AI answer</span></li>`;
+    return `<li ${on} class="${cls}"><span class="ai-text">${esc(row.label)}</span>${row.detail ? `<span class="d">${esc(row.detail)}</span>` : ""}</li>`;
+  }
   function paletteRowHtml(row, k) {
+    if (row.ai) return askRowHtml(row, k);
     const lead = row.swatch ? `<span class="pal-sw" style="--c:${esc(row.swatch)}"></span>` : "";
     const detail = row.detail ? `<span class="d">${esc(row.detail)}</span>` : "";
     return `<li role="option" id="pal-o-${k}" class="${k === palette.index ? "on" : ""}" aria-label="${esc(row.label)}" aria-selected="${k === palette.index}" data-pi="${k}">${lead}<b>${rowLabelHtml(row)}</b>${detail}${rowRightText(row)}</li>`;
@@ -1304,7 +1383,7 @@
 
   function paletteDraw() {
     const { config, result } = palette;
-    const input = $("#pal-in"), typed = input.value, row = palette.rows[palette.index];
+    const input = $("#pal-in"), typed = input.value, picked = palette.rows[palette.index], row = picked && !picked.ai ? picked : undefined;
     const ghost = config.ghost ? result.ghost : "";
     const segments = config.tokens && row && !result.empty ? row.segments : [];
     $("#pal").className = `dlg pal${config.tokens ? " has-tokens" : ""}${config.chips ? " has-chips" : ""}${config.preview ? " has-preview" : ""}`;
@@ -1317,7 +1396,7 @@
     $("#pal-list").innerHTML = listHtml();
     $("#pal-preview").innerHTML = config.preview ? previewHtml(row) : "";
     $("#pal-foot").innerHTML = paletteFooterHtml();
-    input.setAttribute("aria-activedescendant", row ? "pal-o-" + palette.index : "");
+    input.setAttribute("aria-activedescendant", picked ? "pal-o-" + palette.index : "");
     const selected = $("#pal-o-" + palette.index);
     if (selected && selected.scrollIntoView) selected.scrollIntoView({ block: "nearest" });
   }
@@ -1337,7 +1416,7 @@
   function paletteAccept() {
     const { result, config } = palette, row = palette.rows[palette.index];
     if (palette.index === 0 && config.ghost && result.ghost) return paletteFill(result.typed + result.ghost);
-    if (row) paletteFill(row.text);
+    if (row && !row.ai) paletteFill(row.text);
   }
   function rememberCommand(row) {
     if (row.command === "open" || row.command === "page") return;
@@ -1354,6 +1433,7 @@
   function paletteChoose(k) {
     const row = palette.rows[k];
     if (!row) return;
+    if (row.ai) { if (row.issue) { closePalette(); openIssue(row.issue); } return; }
     if (row.complete) paletteRun(row);
     else paletteFill(row.text);
   }
@@ -1559,7 +1639,7 @@
     if ((el = q("[data-set-tab]"))) { S.setTab = el.dataset.setTab; render(); return; }
     if ((el = q("[data-tgl]"))) {
       const k = el.dataset.tgl;
-      if (k === "autopr") { S.autoPr = !S.autoPr; saveSettings(); } else { S.prefs[k] = !S.prefs[k]; savePrefs(); }
+      if (k === "autopr") { S.autoPr = !S.autoPr; saveSettings(); } else if (k === "ai") { S.aiOn = !S.aiOn; saveSettings(); } else { S.prefs[k] = !S.prefs[k]; savePrefs(); }
       render(); return;
     }
     if ((el = q("[data-accent]"))) { const v = el.dataset.accent; vt(() => { applyAccent(v); render(); }); return; }

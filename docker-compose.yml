@@ -6,7 +6,13 @@ services:
       - "9000:9000"
     volumes:
       - workspace-data:/app/data
+      # Prompts for "ask the workspace" appear here on first run. Edit them; no rebuild needed.
+      - ./config:/app/config
     restart: unless-stopped
+    # Optional secrets such as GEMINI_API_KEY. See .env.example.
+    env_file:
+      - path: .env
+        required: false
     # Uncomment environment: and the lines you need.
     # TZ is your team's time zone, so due-date reminders and the Sunday digest go out on the right day
     # (without it the container uses UTC). DEMO starts with sample data on an empty database.

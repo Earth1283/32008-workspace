@@ -389,6 +389,14 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .pal li .r.why { padding: 2px 8px; border-radius: 10px; background: var(--hover); }
 .pal li.on .r.why { background: var(--tint); }
 .pal li .r.why.warn { color: var(--doing); background: color-mix(in srgb, var(--doing) 14%, transparent); }
+.pal li.ai { cursor: default; align-items: flex-start; }
+.pal li.ai .ai-text { min-width: 0; white-space: normal; line-height: 1.45; overflow-wrap: anywhere; }
+.pal li.ai-answer .ai-text { color: var(--text); }
+.pal li.ai-answer span.r { margin-top: 2px; }
+.pal li.ai-waiting, .pal li.ai-thinking { align-items: center; color: var(--faint); }
+.pal li.ai-thinking .ai-text { animation: ai-think 1.4s ease-in-out infinite; }
+@keyframes ai-think { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .pal li.ai-thinking .ai-text { animation: none; } }
 .pal-preview { display: none; align-items: baseline; gap: 10px; padding: 10px 18px; border-top: 1px solid var(--line); background: var(--surface); min-height: 40px; overflow: hidden; white-space: nowrap; }
 .pal.has-preview .pal-preview { display: flex; }
 .pal-preview b { font-weight: 500; flex: none; }

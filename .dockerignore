@@ -7,3 +7,5 @@ test
 Dockerfile
 docker-compose.yml
 *.md
+.env
+config

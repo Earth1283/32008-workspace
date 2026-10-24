@@ -45,7 +45,7 @@ async function browser(base) {
   const dom = await JSDOM.fromURL(base + "/", {
     runScripts: "dangerously", resources, pretendToBeVisual: true, virtualConsole: vc,
     beforeParse(w) {
-      w.fetch = async (url, init = {}) => {
+      w.fetch = async (url, { signal: _jsdomSignal, ...init } = {}) => {
         const res = await fetch(new URL(url, base), { ...init, headers: { ...(init.headers || {}), ...(cookie ? { Cookie: cookie } : {}) } });
         const sc = res.headers.get("set-cookie");
         if (sc) cookie = sc.split(";")[0];
@@ -456,4 +456,53 @@ test("command center settings: presets and switches change what the palette show
   assert.equal(t.q("#pal-chips").innerHTML, "", "no chips in the minimal style");
   assert.equal(t.w.localStorage.getItem("008-pal") !== null, true, "the choice is saved on this device");
   assert.deepEqual(t.errors, []);
+});
+
+test("command center: a question waits for a pause, answers below the local rows, and links to issues", { skip }, async () => {
+  const asked = [];
+  const geminiFetch = async (url, init) => {
+    asked.push(JSON.parse(init.body).contents[0].parts[0].text);
+    const reply = { answer: "FTC-45 is the one holding up the lift.", issues: [45, 9999] };
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(reply) }] } }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  const t = await open({ demo: true, geminiKey: "k", geminiFetch });
+  await t.signIn("joseph", "innovators");
+  await until(() => t.q(".ws b"), "app shell");
+
+  const press = (key) => t.q("#pal-in").dispatchEvent(new t.w.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+  t.w.document.dispatchEvent(new t.w.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
+  await until(() => t.q("#ov-pal").classList.contains("show"), "palette open");
+
+  t.type(t.q("#pal-in"), "set theme to dark");
+  await tick(100);
+  assert.equal(t.q(".ai"), null, "ordinary commands never ask");
+
+  t.type(t.q("#pal-in"), "what's blo");
+  t.type(t.q("#pal-in"), "what's blocking the lift");
+  assert.match(t.q(".ai-waiting").textContent, /Ask the workspace/, "a placeholder row holds the spot while typing");
+  await tick(900);
+  assert.equal(asked.length, 0, "nothing is sent before the pause");
+  await until(() => t.q(".ai-answer"), "the answer", 4000);
+  assert.equal(asked.length, 1, "one question, however many keystrokes");
+  assert.match(asked[0], /Question: what's blocking the lift/);
+  assert.match(t.q(".ai-answer").textContent, /holding up the lift/);
+  press("Enter");
+  await tick(100);
+  assert.ok(t.q("#ov-pal").classList.contains("show"), "Enter on the answer itself does nothing");
+  const link = [...t.d.querySelectorAll("#pal-list li")].find((li) => /FTC-45/.test(li.textContent) && li.querySelector("b"));
+  assert.ok(link, "the issue the answer names is listed");
+  assert.equal([...t.d.querySelectorAll("#pal-list li")].some((li) => /9999/.test(li.textContent)), false, "an issue that doesn't exist is dropped");
+
+  link.click();
+  await until(() => !t.q("#ov-pal").classList.contains("show"), "palette closed");
+  await until(() => /#\/issues\/45/.test(t.w.location.hash), "issue opened");
+
+  t.w.document.dispatchEvent(new t.w.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
+  await until(() => t.q("#ov-pal").classList.contains("show"), "palette reopened");
+  t.type(t.q("#pal-in"), "what's blocking the lift");
+  await tick(100);
+  assert.equal(asked.length, 1, "the same question is not asked twice");
+  press("Escape");
+  assert.deepEqual(t.errors, []);
+  await t.close();
 });

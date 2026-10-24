@@ -8,6 +8,7 @@ import { hashPassword, checkPassword, DUMMY_HASH, newToken, sha256, tempPassword
 import { seedDemo, DEMO_PASSWORD } from "./demo.js";
 import { makeNotifier, localDate } from "./notify.js";
 import { makeGithub } from "./github.js";
+import { makeAsk } from "./ask.js";
 
 const SESSION_SECONDS = 30 * 24 * 3600;
 const DOC_COLLS = {
@@ -57,7 +58,7 @@ function readJson(req, limit = 1_000_000) {
 const hueOf = (s) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
 const today = () => localDate();
 
-export function createApp({ dbPath = "data/008.db", publicDir, demo = false, trustProxy = false, githubFetch, githubApi, githubPollMs = 180_000 } = {}) {
+export function createApp({ dbPath = "data/008.db", publicDir, demo = false, trustProxy = false, githubFetch, githubApi, githubPollMs = 180_000, geminiKey = "", geminiModel = "", geminiFetch, askLimits, configDir = "" } = {}) {
   const db = openDb(dbPath);
   const store = makeStore(db);
   const throttle = makeThrottle();
@@ -79,6 +80,7 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
   };
   const notifier = makeNotifier({ db, store, push });
   const github = makeGithub({ db, store, notifier, broadcast, fetch: githubFetch, api: githubApi });
+  const ask = makeAsk({ store, key: geminiKey, model: geminiModel, configDir, fetch: geminiFetch, ...askLimits });
   const safely = (fn) => () => { try { const r = fn(); if (r && r.catch) r.catch((e) => console.error(e)); } catch (e) { console.error(e); } };
 
   const purge = () => db.prepare("DELETE FROM sessions WHERE expires_at < ?").run(Date.now());
@@ -170,6 +172,7 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
     for (const c of Object.keys(DOC_COLLS)) out[c] = store.list(c);
     out.prefs = notifier.prefs(user.id);
     out.inbox = notifier.list(user.id);
+    out.ask = ask.enabled;
     out.github = { ...store.meta("githubStatus", {}), hasToken: !!store.meta("github", {}).token };
     return out;
   }
@@ -253,6 +256,12 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
       clients.set(res, user.id);
       req.on("close", () => clients.delete(res));
       return;
+    }
+
+    if (a === "ask" && !b && m === "POST") {
+      if (store.meta("settings", {}).ai === false) throw new HttpError(503, "Asking is switched off");
+      const body = await readJson(req, 4_000);
+      return json(res, 200, await ask.ask(user.id, body.q));
     }
 
     if (a === "export" && m === "GET") {

@@ -53,6 +53,18 @@ Set these as environment variables.
 | `TRUST_PROXY` | unset | `1` behind a reverse proxy, so login lockouts follow each real client |
 | `TZ` | the system's | The team's time zone, for example `America/New_York`. Decides when "due tomorrow" and the Sunday digest go out. Docker containers default to UTC |
 | `GITHUB_POLL_SECONDS` | `180` | How often to check GitHub for pull requests. At least 60. `0` turns the timer off (Check now in Settings still works) |
+| `GEMINI_API_KEY` | unset | Turns on "ask the workspace" (see below). Put it in `.env`, which the server reads at start |
+| `GEMINI_MODEL` | `gemini-flash-lite-latest` | Any Gemini model id that supports structured output |
+| `CONFIG_DIR` | `config/` | Where the ask prompts live |
+
+## Ask the workspace
+
+Type a question that starts with "what's" in Ctrl K, for example `what's blocking the lift`. After 1.5 seconds without typing, the server asks a small Gemini model and the answer appears below the normal matches, with the issues it mentions as rows you can open.
+
+- Set `GEMINI_API_KEY` in `.env` (copy `.env.example`) and restart. Use a key from a billing-enabled Google project: on the free tier Google may train on prompts and let reviewers read them. The calls use no Search grounding, caching or file upload, the features Google's zero data retention page says to avoid.
+- Sent: issue titles, status, owners, due dates and blocked reasons; people's first names and roles; parts; milestones; practice runs; meeting titles and action items; notebook titles. Never sent: comments, issue descriptions, notebook text, passwords or tokens.
+- Limits: 12 questions a minute and 300 a day per person. An admin can switch it off in Settings, Integrations.
+- The wording is yours to change. On first run the server writes `config/ask-system.md` and `config/ask-prompt.md`; edit and save, and the next question uses them, no restart. Delete a file to get the original back. `config/` is not in git, so a `git pull` never conflicts with your edits. With Docker it is mounted from `./config` next to the compose file.
 
 ## GitHub
 
