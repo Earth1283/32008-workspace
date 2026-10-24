@@ -19,6 +19,12 @@
   --tint: color-mix(in srgb, var(--brand) 18%, transparent);
   --raise: #1F2025;
   --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 0 0 1px #2E3036;
+  /* motion: arrive on --ease-out, leave on --ease-in, small toggles overshoot on --spring */
+  --ease-out: cubic-bezier(.22, 1, .36, 1);
+  --ease-in: cubic-bezier(.55, 0, 1, .45);
+  --spring: cubic-bezier(.34, 1.45, .64, 1);
+  --t-fast: .12s;
+  --t-ui: .2s;
   color-scheme: dark;
 }
 :root[data-theme="light"] {
@@ -46,6 +52,7 @@
 
 * { box-sizing: border-box; margin: 0; }
 html, body { height: 100%; }
+html { overflow-x: clip; }
 body {
   background: var(--bg);
   color: var(--text);
@@ -56,7 +63,7 @@ body {
 button, input, select, textarea { font: inherit; color: inherit; }
 button { background: none; border: 0; cursor: pointer; text-align: left; }
 a { color: inherit; text-decoration: none; }
-:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; border-radius: 4px; }
+:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; border-radius: 4px; animation: focus-in var(--t-ui) var(--ease-out); }
 .mono { font-family: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
 .dim { color: var(--dim); }
 .faint { color: var(--faint); }
@@ -87,7 +94,7 @@ button.chip { cursor: pointer; }
 .formrow .in { flex: 1; }
 .side {
   background: var(--side); border-right: 1px solid var(--line);
-  display: flex; flex-direction: column; padding: 10px 8px; overflow-y: auto; gap: 2px;
+  display: flex; flex-direction: column; padding: 10px 8px; overflow-y: auto; gap: 2px; position: relative; isolation: isolate;
 }
 .ws { display: flex; align-items: center; gap: 10px; padding: 6px 8px 12px; }
 .logo {
@@ -129,7 +136,7 @@ button.chip { cursor: pointer; }
 }
 .ph h1 { font-size: 13px; font-weight: 600; letter-spacing: -.01em; }
 .ph .r { margin-left: auto; display: flex; align-items: center; gap: 8px; }
-.tabs { display: flex; gap: 2px; padding: 2px; background: var(--side); border: 1px solid var(--line); border-radius: 8px; }
+.tabs { position: relative; isolation: isolate; display: flex; gap: 2px; padding: 2px; background: var(--side); border: 1px solid var(--line); border-radius: 8px; }
 .tab { padding: 3px 10px; border-radius: 6px; color: var(--faint); }
 .tab:hover { color: var(--text); }
 .tab.on { background: var(--raise); color: var(--text); font-weight: 500; box-shadow: var(--shadow), inset 0 -2px 0 var(--brand); }
@@ -141,7 +148,7 @@ button.chip { cursor: pointer; }
 .btn.pri:hover { filter: brightness(1.08); }
 .btn.ghost { border-color: transparent; color: var(--dim); }
 .btn.ghost:hover { color: var(--text); }
-.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg { position: relative; isolation: isolate; display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
 .seg button { padding: 3px 9px; color: var(--dim); }
 .seg button.on { background: var(--tint); color: var(--text); font-weight: 500; }
 .pillsel { background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; color: var(--dim); }
@@ -180,7 +187,7 @@ a.chip:hover { color: var(--text); }
 
 /* issues */
 .split { display: flex; height: calc(100% - 44px); min-height: 0; }
-.list { flex: 1; overflow: auto; min-width: 0; }
+.list { flex: 1; overflow: auto; min-width: 0; position: relative; isolation: isolate; }
 .gh {
   display: flex; align-items: center; gap: 8px; padding: 0 20px; height: 32px; background: var(--side);
   border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; color: var(--dim);
@@ -265,7 +272,7 @@ th { text-align: left; font-weight: 500; color: var(--dim); padding: 8px 12px 8p
 td { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--line); vertical-align: middle; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .bar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
-.bar i { display: block; height: 100%; background: var(--brand); }
+.bar i { transform-origin: left; display: block; height: 100%; background: var(--brand); }
 .bar.over i { background: var(--blocked); }
 
 /* season */
@@ -275,10 +282,10 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .grow { position: relative; height: 34px; border-top: 1px solid var(--line); }
 .grow .lab { position: absolute; left: 0; top: 8px; width: 120px; color: var(--dim); }
 .gtrack { position: absolute; left: 130px; right: 0; top: 0; bottom: 0; }
-.gbar { position: absolute; top: 10px; height: 14px; border-radius: 4px; background: var(--hover); border: 1px solid var(--line); }
-.gbar i { position: absolute; inset: 0 auto 0 0; background: var(--brand); opacity: .55; border-radius: 3px; }
+.gbar { transform-origin: left; position: absolute; top: 10px; height: 14px; border-radius: 4px; background: var(--hover); border: 1px solid var(--line); }
+.gbar i { transform-origin: left; position: absolute; inset: 0 auto 0 0; background: var(--brand); opacity: .55; border-radius: 3px; }
 .gline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line); }
-.gline.today { background: var(--brand); width: 2px; }
+.gline.today { background: var(--brand); width: 2px; transform-origin: top; }
 .gline.main { background: var(--text); opacity: .5; }
 .gtag { position: absolute; top: 0; font-size: 11px; color: var(--dim); transform: translateX(-50%); white-space: nowrap; }
 
@@ -287,15 +294,15 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .chart svg { width: 100%; height: auto; display: block; overflow: visible; }
 .chart .lab { font-size: 11px; fill: var(--faint); }
 .chart .grid { stroke: var(--line); stroke-width: 1; }
-.chart .ln { fill: none; stroke: var(--brand); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
-.chart .pt { fill: var(--bg); stroke: var(--brand); stroke-width: 2; }
+.chart .ln { stroke-dasharray: 1; fill: none; stroke: var(--brand); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart .pt { transform-box: fill-box; transform-origin: center; fill: var(--bg); stroke: var(--brand); stroke-width: 2; }
 .chart .pt.last { fill: var(--brand); }
 .form { display: grid; grid-template-columns: 130px 120px 90px 90px 1fr auto; gap: 8px; margin: 12px 0 24px; }
 .form.parts { grid-template-columns: 1.6fr 1fr 70px 70px 90px 1fr auto; }
 
 /* two-pane pages */
 .pane2 { display: grid; grid-template-columns: 300px 1fr; height: calc(100% - 44px); }
-.pl { border-right: 1px solid var(--line); overflow: auto; }
+.pl { border-right: 1px solid var(--line); overflow: auto; position: relative; isolation: isolate; }
 .pi { display: block; width: 100%; padding: 10px 20px; border-bottom: 1px solid var(--line); }
 .pi:hover { background: var(--hover); }
 .pi.on { background: var(--tint); box-shadow: inset 2px 0 0 var(--brand); }
@@ -334,7 +341,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* overlays */
 .ov { position: fixed; inset: 0; background: var(--overlay); display: none; z-index: 50; }
-.ov.show { display: flex; justify-content: center; align-items: flex-start; padding-top: 14vh; }
+.ov.leaving { pointer-events: none; }
+.ov.show, .ov.leaving { display: flex; justify-content: center; align-items: flex-start; padding-top: 14vh; }
 .dlg { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; width: min(560px, calc(100vw - 32px)); box-shadow: 0 24px 60px rgba(0, 0, 0, .35); overflow: hidden; }
 .dlg .hd { padding: 16px 18px 0; font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
 .dlg .bd { padding: 12px 18px 18px; }
@@ -349,7 +357,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .fl label { display: block; color: var(--dim); font-size: 12px; margin-bottom: 4px; }
 .fl select { width: 100%; }
 #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 60; display: none; align-items: center; gap: 14px; background: var(--text); color: var(--bg); padding: 9px 14px; border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,.3); }
-#toast.show { display: flex; }
+#toast.show, #toast.leaving { display: flex; }
+#toast.leaving { pointer-events: none; }
 #toast button { color: var(--bg); font-weight: 600; text-decoration: underline; }
 #mention { position: fixed; z-index: 70; min-width: 280px; max-width: min(380px, calc(100vw - 16px)); margin: 0; padding: 4px; list-style: none; background: var(--raise); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.28); }
 #mention[hidden] { display: none; }
@@ -382,7 +391,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 }
 @media (max-width: 900px) {
   .app { grid-template-columns: 1fr; }
-  .side { position: fixed; inset: 0 auto 0 0; width: 260px; z-index: 40; transform: translateX(-100%); transition: transform .18s ease-out; }
+  .side { position: fixed; inset: 0 auto 0 0; width: 260px; z-index: 40; transform: translateX(-100%); transition: transform .2s var(--ease-in), box-shadow .2s; }
+  .app.open .side { transition: transform .32s var(--ease-out), box-shadow .32s; }
   .app.open .side { transform: none; box-shadow: 20px 0 60px rgba(0,0,0,.4); }
   .topbar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
   .main { height: calc(100vh - 0px); }
@@ -396,4 +406,51 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .form, .form.parts { grid-template-columns: 1fr 1fr; }
   .ph { padding: 0 12px; flex-wrap: wrap; }
 }
-@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+/* motion
+   render() replaces the DOM, so state changes are animated from app.js. CSS here covers hover and press feedback,
+   which happen on live elements, and the .moved settle that app.js adds to a control whose state just changed. */
+.btn, .tab, .seg button, .chip, .search, .card, .sw, .pillsel, .in {
+  transition: background-color var(--t-fast), color var(--t-fast), border-color var(--t-fast), box-shadow var(--t-ui), filter var(--t-fast), transform var(--t-fast) var(--ease-out);
+}
+/* lists light up at once under the pointer and fade out behind it */
+.nav, .row, .li, .pi, .sel, .rm, .close, .props select, .props input, .blk > h3 a, .blk > h3 button, .li .t {
+  transition: background-color .18s, color .18s;
+}
+.nav:hover, .row:hover, .li:hover, .li:hover .t, .pi:hover, .sel:hover, .rm:hover, .close:hover { transition-duration: 0s; }
+.btn:active:not(:disabled), .tab:active, .seg button:active, .search:active, button.chip:active { transform: scale(.96); }
+.card:hover { transform: translateY(-1px); }
+.card:active { transform: scale(.98); transition-duration: .08s; }
+.sw:hover { transform: scale(1.12); }
+.sw:active { transform: scale(.9); }
+.tgl::after { transition: transform var(--t-ui) var(--spring), width var(--t-fast) var(--ease-out); }
+.tgl:active:not(:disabled)::after { width: 20px; }
+.tgl[aria-checked="true"]:active:not(:disabled)::after { transform: translateX(10px); }
+.btn.busy { cursor: progress; opacity: .8; animation: busy 1.2s ease-in-out infinite; }
+.nav.busy { cursor: progress; }
+.glide { position: absolute; z-index: -1; pointer-events: none; }
+.gliding { background: transparent !important; box-shadow: none !important; transition: none !important; }
+.si path[pathLength] { stroke-dasharray: 1; }
+
+.tgl.moved { animation: tgl-on .22s ease-out; }
+.tgl.moved[aria-checked="false"] { animation-name: tgl-off; }
+/* the slide is one segment (a spring per keyframe would stall halfway); the stretch rides on scale beside it */
+.tgl.moved::after { animation: knob-on .34s var(--spring), knob-stretch .28s ease-in-out; }
+.tgl.moved[aria-checked="false"]::after { animation-name: knob-off; }
+.sw.moved[aria-pressed="true"] { animation: ring-in .34s var(--spring); }
+button.chip.moved { animation: pop .3s var(--spring); }
+.note.moved .dot { animation: dot-read .32s var(--ease-in); }
+.nav .n.moved { display: inline-block; animation: bump .4s var(--spring); }
+
+@keyframes focus-in { from { outline-offset: 4px; outline-color: transparent; } }
+@keyframes tgl-on { from { background: var(--line); } }
+@keyframes tgl-off { from { background: var(--brand); } }
+@keyframes knob-on { from { transform: translateX(0); } }
+@keyframes knob-off { from { transform: translateX(14px); } }
+@keyframes knob-stretch { 50% { scale: 1.25 1; } }
+@keyframes ring-in { from { box-shadow: 0 0 0 2px var(--raise), 0 0 0 2px var(--c); } }
+@keyframes pop { from { transform: scale(.9); } }
+@keyframes dot-read { from { background: var(--brand); } to { transform: scale(0); } }
+@keyframes busy { 50% { opacity: .55; } }
+@keyframes bump { 40% { transform: scale(1.35); } }
+
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }

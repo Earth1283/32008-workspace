@@ -210,6 +210,152 @@
     page.querySelectorAll("[data-drag]").forEach((el) => { el.draggable = false; });
   }
   const renderSide = () => { $("#side").innerHTML = sideHtml(); };
+
+  /* ---------- motion ----------
+     One vocabulary: things arrive on EASE.out, leave faster on EASE.in, and small toggles settle with a slight overshoot.
+     render() rebuilds the DOM, so CSS transitions never see a state change. Instead render() takes a snapshot first and
+     settle() animates from it afterwards. Page entrances only play when you move to another page, not on every redraw. */
+  const EASE = { out: "cubic-bezier(.22, 1, .36, 1)", in: "cubic-bezier(.55, 0, 1, .45)", inOut: "cubic-bezier(.65, 0, .35, 1)", spring: "cubic-bezier(.34, 1.45, .64, 1)" };
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const calm = () => !!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
+  const anim = (el, kf, o = {}) => (el && el.animate && !calm() ? el.animate(kf, { duration: 280, easing: EASE.out, fill: "backwards", ...o }) : null);
+  const stop = (el) => { if (el && el.getAnimations) el.getAnimations().forEach((a) => a.cancel()); };
+  const vt = (fn) => (document.startViewTransition && !calm() ? document.startViewTransition(fn) : fn());
+  const motion = { page: undefined, pane: null, arg: null, bump: null };
+
+  /** Fades and lifts elements in, in reading order. Anything below the fold just appears. */
+  function reveal(els, { step = 30, max = 10, y = 6, delay = 0 } = {}) {
+    const vis = els.map((el) => [el, el.getBoundingClientRect()]).filter(([, r]) => r.top < innerHeight)
+      .sort(([, a], [, b]) => Math.round(a.top / 8) - Math.round(b.top / 8) || a.left - b.left);
+    vis.forEach(([el], k) => anim(el, [{ opacity: 0, transform: `translateY(${y}px)` }, { opacity: 1, transform: "none" }], { duration: 320, delay: delay + Math.min(k, max) * step }));
+  }
+  const shake = (el) => anim(el, [{ transform: "none" }, { transform: "translateX(-6px)" }, { transform: "translateX(5px)" }, { transform: "translateX(-3px)" }, { transform: "none" }], { duration: 320, easing: EASE.inOut });
+
+  /** Shows something hidden with display:none. Returns true when it was already showing. */
+  function arrive(el, runs) {
+    const was = el.classList.contains("show");
+    if (el.classList.contains("leaving")) { el.classList.remove("leaving"); runs.forEach(([x]) => stop(x)); }
+    el.classList.add("show");
+    if (!was) runs.forEach(([x, kf, o]) => anim(x, kf, o));
+    return was;
+  }
+  /** Plays the entrance backwards, faster. The element stays visible as .leaving, but no longer counts as shown. */
+  function leave(el, runs) {
+    if (!el.classList.contains("show")) return;
+    el.classList.replace("show", "leaving");
+    const all = runs.map(([x, kf, o]) => anim(x, kf.slice().reverse(), { ...o, duration: 150, easing: EASE.in, fill: "forwards" })).filter(Boolean);
+    const end = () => { if (el.classList.contains("leaving")) { el.classList.remove("leaving"); runs.forEach(([x]) => stop(x)); } };
+    if (all.length) Promise.all(all.map((a) => a.finished)).then(end, end); else end();
+  }
+  const ovRuns = (ov) => [[ov, [{ opacity: 0 }, { opacity: 1 }], { duration: 180, easing: "ease-out" }],
+    [ov.firstElementChild, [{ opacity: 0, transform: "translateY(-6px) scale(.98)" }, { opacity: 1, transform: "none" }], { duration: 260 }]];
+  const toastRuns = (t) => [[t, [{ opacity: 0, transform: "translate(-50%, 14px) scale(.96)" }, { opacity: 1, transform: "translate(-50%, 0)" }], { duration: 340, easing: EASE.spring }]];
+
+  /* The highlight behind a selected item slides from where it was. [container, selected item, same on every page] */
+  const GLIDES = [["#side", ".nav.on", true], [".tabs", ".tab.on"], [".seg", ".on"], [".pl", ".pi.on"], [".list", ".row.on"]];
+  const KEYED = "[data-issue], [data-issue-go], [data-note], [data-nb], [data-mt], [data-g]";
+  const keyOf = (el) => ["issue", "issueGo", "note", "nb", "mt", "g"].map((k) => el.dataset[k] ?? "").join(":");
+  const hostOf = (el) => [...el.attributes].filter((a) => a.name.startsWith("data-")).map((a) => a.name + "=" + a.value).join(" ");
+  /* Controls whose new state gets a small settle animation (.moved, styled in CSS). [selector, state, element to mark] */
+  const WATCH = [
+    ["[data-tgl]", (el) => el.getAttribute("aria-checked")],
+    ["[data-accent], [data-attend], [data-follow], [data-note]", (el) => el.className + el.getAttribute("aria-pressed")],
+    ["#side .nav", (el) => (el.querySelector(".n") || {}).textContent || "", (el) => el.querySelector(".n")],
+  ];
+  const box = (on, c) => { const r = on.getBoundingClientRect(), b = c.getBoundingClientRect(); return { x: r.left - b.left - c.clientLeft + c.scrollLeft, y: r.top - b.top - c.clientTop + c.scrollTop, w: r.width, h: r.height }; };
+
+  function snapshot() {
+    const s = { rects: new Map(), glides: new Map(), states: new Map() };
+    const n = {};
+    $$("#page " + KEYED.split(", ").join(", #page ")).forEach((el) => { const k = keyOf(el); n[k] = (n[k] || 0) + 1; s.rects.set(k + "#" + n[k], el.getBoundingClientRect()); });
+    GLIDES.forEach(([c, sel, global], g) => $$(c).forEach((el, k) => { const on = el.querySelector(sel); if (on) s.glides.set(`${global ? "" : motion.route}|${g}|${k}`, box(on, el)); }));
+    WATCH.forEach(([sel, val], w) => $$(sel).forEach((el) => s.states.set(w + ":" + hostOf(el), val(el))));
+    return s;
+  }
+
+  function glide(on, c, from) {
+    const to = box(on, c);
+    if (Math.abs(from.x - to.x) < 1 && Math.abs(from.y - to.y) < 1) return;
+    if (!c.animate || calm()) return;
+    const cs = getComputedStyle(on), g = document.createElement("span");
+    g.className = "glide";
+    Object.assign(g.style, { left: to.x + "px", top: to.y + "px", width: to.w + "px", height: to.h + "px", background: cs.backgroundColor, boxShadow: cs.boxShadow, borderRadius: cs.borderRadius });
+    c.prepend(g); on.classList.add("gliding");
+    const a = anim(g, [{ transform: `translate(${from.x - to.x}px, ${from.y - to.y}px)`, width: from.w + "px", height: from.h + "px" }, { transform: "none", width: to.w + "px", height: to.h + "px" }], { duration: 300 });
+    // The item's own highlight fades back in over the ghost, so keep the ghost a moment longer.
+    a.finished.then(() => { on.classList.remove("gliding"); setTimeout(() => g.remove(), 200); }, () => g.remove());
+  }
+
+  function countUp(el) {
+    const n = +el.textContent, t0 = performance.now(), d = 900;
+    if (!n || calm() || !el.animate) return;
+    const f = (t) => { if (!el.isConnected) return; const p = Math.min(1, (t - t0) / d); el.textContent = Math.round(n * (1 - Math.pow(1 - p, 4))); if (p < 1) requestAnimationFrame(f); };
+    el.textContent = 0; requestAnimationFrame(f);
+  }
+
+  const REVEAL = {
+    home: ".hero, .blk", issues: ".gh, .row, .col, .empty", season: ".hero, .gantt, .blk, .empty", inbox: ".follow, .li, .empty",
+    parts: ".hero, .form, tbody tr, .empty", practice: ".chart, .blk, tbody tr, .empty",
+    notebook: ".pl > *, .pr > *", meetings: ".pl > *, .pr > *, .page > .empty", settings: ".pl > *, .pr > *",
+    pit: ".pitwrap header, .pit-grid > div, .pit-two h3, .pit-two p",
+  };
+  function enterPage(route) {
+    const page = $("#page");
+    reveal($$(REVEAL[route] || ".wrap > *", page), route === "pit" ? { step: 50, y: 12 } : {});
+    $$(".chart svg", page).forEach((svg) => {
+      anim(svg.querySelector(".ln"), [{ strokeDashoffset: 1 }, { strokeDashoffset: 0 }], { duration: 800, delay: 160, easing: EASE.inOut });
+      const pts = $$(".pt", svg);
+      pts.forEach((p, k) => anim(p, [{ transform: "scale(0)" }, { transform: "none" }], { duration: 320, delay: 160 + (800 * k) / Math.max(1, pts.length - 1) * 0.85, easing: EASE.spring }));
+    });
+    $$(".gbar", page).forEach((b, k) => {
+      anim(b, [{ transform: "scaleX(0)" }, { transform: "none" }], { duration: 600, delay: 140 + k * 70 });
+      anim(b.firstElementChild, [{ transform: "scaleX(0)" }, { transform: "none" }], { duration: 500, delay: 460 + k * 70 });
+    });
+    anim($(".gline.today", page), [{ opacity: 0, transform: "scaleY(0)" }, { opacity: 1, transform: "none" }], { duration: 400, delay: 380 });
+    $$(".bar i", page).forEach((b) => anim(b, [{ transform: "scaleX(0)" }, { transform: "none" }], { duration: 800, delay: 160, easing: EASE.inOut }));
+    $$("[data-count]", page).forEach(countUp);
+  }
+
+  function settle(s, route) {
+    const page = route + (route === "issues" ? ":" + S.mode : "");
+    const pane = { notebook: S.nbSel, meetings: S.mtSel, settings: S.setTab }[route] ?? null;
+    const arg = route === "issues" ? S.arg : null;
+    const fresh = page !== motion.page;
+    if (fresh) enterPage(route);
+    else {
+      const n = {};
+      $$("#page " + KEYED.split(", ").join(", #page ")).forEach((el) => {
+        const k = keyOf(el); n[k] = (n[k] || 0) + 1;
+        const was = s.rects.get(k + "#" + n[k]), r = el.getBoundingClientRect();
+        if (!was) { anim(el, [{ opacity: 0 }, { opacity: 1 }], { duration: 240 }); return; }
+        const dx = was.left - r.left, dy = was.top - r.top;
+        if (Math.abs(dx) >= 1 || Math.abs(dy) >= 1) anim(el, [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], { duration: 340 });
+      });
+      if (pane !== motion.pane) reveal($$(".pr > *"), { step: 24, max: 6 });
+    }
+    const p = $(".panel");
+    if (p && arg !== motion.arg) {
+      if (!motion.arg || fresh) anim(p, [{ opacity: 0, transform: "translateX(24px)" }, { opacity: 1, transform: "none" }], { duration: 320 });
+      else anim(p, [{ opacity: 0.45, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 200 });
+    }
+    GLIDES.forEach(([c, sel, global], g) => $$(c).forEach((el, k) => {
+      const on = el.querySelector(sel), from = s.glides.get(`${global ? "" : route}|${g}|${k}`);
+      if (on && from) glide(on, el, from);
+    }));
+    WATCH.forEach(([sel, val, target], w) => $$(sel).forEach((el) => {
+      const was = s.states.get(w + ":" + hostOf(el));
+      if (was !== undefined && was !== val(el)) { const t = target ? target(el) : el; if (t) t.classList.add("moved"); }
+    }));
+    if (motion.bump != null) {
+      $$(`#page [data-issue="${motion.bump}"] .si`).forEach((si) => {
+        anim(si, [{ transform: "scale(.5)" }, { transform: "none" }], { duration: 420, easing: EASE.spring });
+        anim(si.querySelector("path[pathLength]"), [{ strokeDashoffset: 1 }, { strokeDashoffset: 0 }], { duration: 320, delay: 120 });
+      });
+      anim($(".panel .callout"), [{ opacity: 0, transform: "translateY(-4px)" }, { opacity: 1, transform: "none" }], { duration: 280 });
+      motion.bump = null;
+    }
+    Object.assign(motion, { page, pane, arg, route });
+  }
   function applyAccent(hex) {
     const r = document.documentElement.style;
     S.accent = hex || "";
@@ -267,7 +413,7 @@
     if (s === "doing") inner = `<path d="M7 7V3.25A3.75 3.75 0 0 1 7 10.75Z" fill="${c}"/>`;
     if (s === "review") inner = `<path d="M7 7V3.25A3.75 3.75 0 1 1 3.25 7Z" fill="${c}"/>`;
     if (s === "blocked") inner = `<rect x="4.2" y="6.2" width="5.6" height="1.6" rx=".8" fill="${c}"/>`;
-    if (s === "done") return `<svg class="si" width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="${c}"/><path d="M4.4 7.2l1.9 1.9 3.3-3.8" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    if (s === "done") return `<svg class="si" width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="6" fill="${c}"/><path d="M4.4 7.2l1.9 1.9 3.3-3.8" pathLength="1" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
     return `<svg class="si" width="14" height="14" viewBox="0 0 14 14" role="img" aria-label="${F.status[s]}">${ring}${inner}</svg>`;
   };
   const priIcon = (p) => {
@@ -448,7 +594,7 @@
         return `<div class="col" data-drop="${s}"><h4>${statusIcon(s)}${F.status[s]}<span>${c.length}</span></h4>${c.map(cardHtml).join("")}</div>`;
       }).join("")}</div>`;
     } else {
-      body = grouped().map(([s, a]) => `<div class="gh">${statusIcon(s)}<b>${F.status[s]}</b><span>${a.length}</span></div>${a.map(rowHtml).join("")}`).join("");
+      body = grouped().map(([s, a]) => `<div class="gh" data-g="${s}">${statusIcon(s)}<b>${F.status[s]}</b><span>${a.length}</span></div>${a.map(rowHtml).join("")}`).join("");
     }
     const subTitle = S.sub ? F.subs[S.sub] : S.view === "mine" ? "My issues" : "Issues";
     return `
@@ -517,7 +663,7 @@
     const pts = vals.map((v, k) => `${x(k).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
     const grid = labels ? [min, (min + max) / 2, max].map((g) => `<line class="grid" x1="${pl}" x2="${w - pr}" y1="${y(g)}" y2="${y(g)}"/><text class="lab" x="${pl - 6}" y="${y(g) + 4}" text-anchor="end">${Math.round(g)}</text>`).join("") : "";
     const xl = labels ? dates.map((d, k) => k % 2 === 0 || n < 5 ? `<text class="lab" x="${x(k)}" y="${h - 4}" text-anchor="middle">${F.fmt(d)}</text>` : "").join("") : "";
-    return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Trend, latest ${vals[n - 1]}">${grid}${xl}<polyline class="ln" points="${pts}"/>${vals.map((v, k) => `<circle class="pt ${k === n - 1 ? "last" : ""}" cx="${x(k)}" cy="${y(v)}" r="3.5"/>`).join("")}</svg>`;
+    return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Trend, latest ${vals[n - 1]}">${grid}${xl}<polyline class="ln" pathLength="1" points="${pts}"/>${vals.map((v, k) => `<circle class="pt ${k === n - 1 ? "last" : ""}" cx="${x(k)}" cy="${y(v)}" r="3.5"/>`).join("")}</svg>`;
   }
 
   const addDays = (s, n) => { const d = F.parse(s); d.setDate(d.getDate() + n); return F.iso(d); };
@@ -672,7 +818,7 @@
     const q = qualifier();
     return `<div class="pitwrap">
       <header><div><div class="dim" style="font-size:18px">${esc(F.team.num)} ${esc(F.team.name)}</div>
-        ${q ? `<div class="pit-num">${Math.max(0, F.days(q.date))} days</div><div class="dim" style="font-size:22px">to the ${esc(q.name.toLowerCase())}, ${F.fmt(q.date)}</div>` : `<div class="pit-num">Pit board</div>`}</div>
+        ${q ? `<div class="pit-num"><span data-count>${Math.max(0, F.days(q.date))}</span> days</div><div class="dim" style="font-size:22px">to the ${esc(q.name.toLowerCase())}, ${F.fmt(q.date)}</div>` : `<div class="pit-num">Pit board</div>`}</div>
         <button class="btn x" data-go="home">Exit pit board</button></header>
       <div class="pit-grid">${F.robotSubs.map((k) => { const h = health(k); return `<div>${dot(h.s)}${F.subs[k]}<small>${h.label}${h.n ? ", " + h.n + " open" : ""}</small></div>`; }).join("")}</div>
       <div class="pit-two">
@@ -762,7 +908,9 @@
     if (S.es) { S.es.close(); S.es = null; }
     $("#app").className = "app auth";
     $("#page").innerHTML = `<div class="authwrap">${html}</div>`;
-    $("#ov-modal").classList.remove("show");
+    $("#ov-modal").classList.remove("show", "leaving");
+    motion.page = undefined;
+    reveal($$(".authbox > *"), { step: 40, y: 8 });
     const f = $("#page input"); if (f) f.focus();
   }
   const teamMark = () => { const t = S.session && S.session.team; return t ? `<span class="logo ${t.logo ? "img" : ""}" ${t.logo ? `style="background-image:url('${esc(t.logo)}')"` : ""}>${esc(t.short || "008")}</span>` : '<span class="logo">008</span>'; };
@@ -808,7 +956,7 @@
       <button class="btn pri">Save password</button>
     </form>`);
   }
-  const authError = (m) => { const e = $("#auth-err"); if (e) e.textContent = m; };
+  const authError = (m) => { const e = $("#auth-err"); if (e) e.textContent = m; shake($(".authbox")); };
 
   function sessionEnded() {
     S.ready = false;
@@ -844,6 +992,7 @@
   function render() {
     if (!S.ready) return;
     mentionClose();
+    const snap = snapshot();
     const keep = ["list", "panel"].map((c) => { const el = $("." + c); return el ? el.scrollTop : 0; });
     const route = S.route === "mine" ? "issues" : S.route;
     const view = views[route] || views.home;
@@ -855,6 +1004,7 @@
     const l = $(".list"), p = $(".panel");
     if (l) l.scrollTop = keep[0];
     if (p) p.scrollTop = keep[1];
+    settle(snap, route);
     document.title = `${unread() ? `(${unread()}) ` : ""}${F.team.short || "008"} Workspace`;
   }
 
@@ -862,13 +1012,15 @@
   function toast(text, label, fn) {
     const t = $("#toast");
     t.innerHTML = `<span>${esc(text)}</span>${label ? `<button>${esc(label)}</button>` : ""}`;
-    t.classList.add("show");
-    if (label) t.querySelector("button").onclick = () => { t.classList.remove("show"); fn(); };
+    if (arrive(t, toastRuns(t))) anim(t, [{ transform: "translate(-50%, 0) scale(.96)" }, { transform: "translate(-50%, 0)" }], { duration: 260, easing: EASE.spring });
+    if (label) t.querySelector("button").onclick = () => { hideToast(); fn(); };
     clearTimeout(S.toastTimer);
-    S.toastTimer = setTimeout(() => t.classList.remove("show"), 6500);
+    S.toastTimer = setTimeout(hideToast, 6500);
   }
+  const hideToast = () => { const t = $("#toast"); leave(t, toastRuns(t)); };
   function setStatus(i, s) {
     if (!canWrite()) return;
+    if (i.status !== s) motion.bump = i.id;
     i.status = s;
     persist("issues", i);
     if (s === "done" && !i.logged) toast(`FTC-${i.id} is done. Add it to the notebook?`, "Draft entry", () => draft(i.id));
@@ -886,10 +1038,44 @@
     go("notebook");
   }
   function openIssue(id) { go("issues/" + id); }
+  function closeIssue() {
+    const p = $(".panel");
+    if (!p || p.classList.contains("leaving")) return go("issues");
+    p.classList.add("leaving");
+    const a = anim(p, [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateX(24px)" }], { duration: 160, easing: EASE.in, fill: "forwards" });
+    if (a) a.finished.then(() => go("issues"), () => {}); else go("issues");
+  }
 
-  function showModal(html) { $("#modal").innerHTML = html; $("#ov-modal").classList.add("show"); const f = $("#modal input:not([type=checkbox]), #modal select"); if (f) f.focus(); }
-  function closeModal() { $("#ov-modal").classList.remove("show"); if (S.dirty) setTimeout(rerenderIfIdle, 50); }
-  const modalErr = (m) => { const e = $("#modal .err"); if (e) e.textContent = m; };
+  /* A button waiting on the server says what it is doing: "Sign in" reads "Signing in…" until the request settles.
+     The label only changes once the wait passes BUSY_AFTER ms, so quick requests don't flash it. */
+  const ING = { Add: "Adding", Check: "Checking", Create: "Creating", Delete: "Deleting", Draft: "Drafting", Log: "Logging", Make: "Making", Remove: "Removing", Reset: "Resetting", Save: "Saving", Send: "Sending", Sign: "Signing" };
+  const BUSY_AFTER = 150;
+  /** Disables btn at once and relabels it (or its text part, label) if the wait drags on. Returns a function that puts it back. */
+  function busy(btn, label = btn) {
+    if (!btn || !label) return () => {};
+    const was = label.textContent;
+    const [verb, ...rest] = was.trim().split(/\s+/);
+    btn.disabled = true; btn.setAttribute("aria-busy", "true");
+    const show = setTimeout(() => {
+      const w = btn.offsetWidth;
+      if (w) btn.style.minWidth = w + "px";
+      btn.classList.add("busy");
+      label.textContent = btn.dataset.busy || (ING[verb] ? [ING[verb], ...rest].join(" ") : was.trim()) + "…";
+    }, BUSY_AFTER);
+    return () => {
+      clearTimeout(show);
+      btn.disabled = false; btn.removeAttribute("aria-busy");
+      if (btn.classList.contains("busy")) { btn.classList.remove("busy"); btn.style.minWidth = ""; label.textContent = was; }
+    };
+  }
+
+  function showModal(html) {
+    const ov = $("#ov-modal");
+    $("#modal").innerHTML = html;
+    if (arrive(ov, ovRuns(ov))) reveal([$("#modal").firstElementChild], { y: 4 });
+    const f = $("#modal input:not([type=checkbox]), #modal select"); if (f) f.focus(); }
+  function closeModal() { const ov = $("#ov-modal"); leave(ov, ovRuns(ov)); if (S.dirty) setTimeout(rerenderIfIdle, 50); }
+  const modalErr = (m) => { const e = $("#modal .err"); if (e) e.textContent = m; shake($("#modal")); };
   const footer = (ok, cancel = true) => `<p class="err" role="alert" style="padding:0 18px"></p><div class="ft">${cancel ? '<button type="button" class="btn" data-act="close-modal">Cancel</button>' : ""}<button class="btn pri">${ok}</button></div>`;
 
   function newIssueModal(seed = {}) {
@@ -922,16 +1108,17 @@
   /* command palette */
   let palItems = [], palIdx = 0;
   function openPalette() {
-    $("#ov-pal").classList.add("show");
+    const ov = $("#ov-pal");
+    arrive(ov, ovRuns(ov));
     const inp = $("#pal-in"); inp.value = ""; palFilter(""); inp.focus();
   }
-  function closePalette() { $("#ov-pal").classList.remove("show"); }
+  function closePalette() { const ov = $("#ov-pal"); leave(ov, ovRuns(ov)); }
   function palFilter(q) {
     q = q.trim().toLowerCase();
     const all = [
       ...[["home", "Home"], ["inbox", "Inbox"], ["issues", "Issues"], ["season", "Season"], ["notebook", "Notebook"], ["parts", "Parts"], ["practice", "Practice"], ["meetings", "Meetings"], ["pit", "Pit board"], ["settings", "Settings"]].map(([k, l]) => ({ label: "Go to " + l, hint: "Page", run: () => go(k) })),
       ...(canWrite() ? [{ label: "New issue", hint: "C", run: () => newIssueModal() }] : []),
-      { label: "Toggle theme", hint: "Action", run: toggleTheme },
+      { label: "Toggle theme", hint: "Action", run: () => vt(toggleTheme) },
       { label: "Connect GitHub", hint: "Action", run: githubModal },
       { label: "Sign out", hint: "Action", run: logout },
       ...F.issues.map((i) => ({ label: `FTC-${i.id}  ${i.title}`, hint: F.status[i.status], run: () => openIssue(i.id) })),
@@ -989,6 +1176,7 @@
     const box = $("#mention");
     box.innerHTML = mn.items.map((x, k) => `<li role="option" id="mn-${k}" aria-selected="${k === mn.idx}" class="${k === mn.idx ? "on" : ""}" data-mn="${k}">
       ${x.person ? av(x.person) : `<span class="av team" aria-hidden="true">${ico("issues")}</span>`}<b>${esc(x.label)}</b><span class="mono dim">@${esc(x.handle)}</span>${x.hint ? `<span class="r">${esc(x.hint)}</span>` : ""}</li>`).join("");
+    if (box.hidden) anim(box, [{ opacity: 0, transform: "translateY(-4px)" }, { opacity: 1, transform: "none" }], { duration: 160 });
     box.hidden = false;
     const r = mn.el.getBoundingClientRect(), c = caretXY(mn.el, mn.at);
     const bw = box.offsetWidth || 300, bh = box.offsetHeight || 220;
@@ -1065,7 +1253,7 @@
     if ((el = q("[data-mode]"))) { S.mode = el.dataset.mode; saveUi(); render(); return; }
     if ((el = q("[data-issue-go]"))) { openIssue(el.dataset.issueGo); return; }
     if ((el = q("[data-issue]"))) { openIssue(el.dataset.issue); return; }
-    if ((el = q("[data-draft]"))) { draft(el.dataset.draft); return; }
+    if ((el = q("[data-draft]"))) { const done = busy(el); draft(el.dataset.draft).finally(done); return; }
     if ((el = q("[data-note]"))) {
       const n = S.inbox.find((x) => x.id === +el.dataset.note); if (!n) return;
       if (!n.read) markRead([n.id]);
@@ -1092,10 +1280,11 @@
       const [coll, id] = el.dataset.rm.split(":");
       const label = { issues: "this issue", notebook: "this notebook entry", meetings: "this meeting", parts: "this part", practice: "this session", milestones: "this milestone", phases: "this phase" }[coll];
       if (!window.confirm(`Delete ${label}? This can't be undone.`)) return;
+      const done = busy(el);
       try {
         await remove(coll, id);
         if (coll === "issues") go("issues"); else render();
-      } catch (err) { writeFailed(err); }
+      } catch (err) { done(); writeFailed(err); }
       return;
     }
     if ((el = q("[data-attend]"))) {
@@ -1115,11 +1304,12 @@
     if ((el = q("[data-mkissue]"))) {
       const [mid, aid] = el.dataset.mkissue.split(":");
       const m = F.meetings.find((x) => x.id === mid), a = m.actions.find((x) => x.id === aid);
+      const done = busy(el);
       try {
         const i = await create("issues", { title: a.text, type: "build", sub: "team", pri: "med", status: "todo", who: [a.who], created: F.today, desc: `From the ${m.title.toLowerCase()} on ${F.fmt(m.date)}.` });
         a.issue = i.id; await persist("meetings", m);
         toast(`Created FTC-${i.id}.`, "Open", () => openIssue(i.id)); render();
-      } catch (err) { writeFailed(err); }
+      } catch (err) { done(); writeFailed(err); }
       return;
     }
     if ((el = q("[data-pi]"))) { palRun(+el.dataset.pi); return; }
@@ -1129,25 +1319,27 @@
       if (k === "autopr") { S.autoPr = !S.autoPr; saveSettings(); } else { S.prefs[k] = !S.prefs[k]; savePrefs(); }
       render(); return;
     }
-    if ((el = q("[data-accent]"))) { applyAccent(el.dataset.accent); render(); return; }
-    if ((el = q("[data-theme-set]"))) { setThemePref(el.dataset.themeSet); render(); return; }
+    if ((el = q("[data-accent]"))) { const v = el.dataset.accent; vt(() => { applyAccent(v); render(); }); return; }
+    if ((el = q("[data-theme-set]"))) { const v = el.dataset.themeSet; vt(() => { setThemePref(v); render(); }); return; }
     if ((el = q("[data-density]"))) { S.density = el.dataset.density; saveUi(); render(); return; }
     if (q("[data-logo-clear]")) { F.team.logo = null; saveTeam(); render(); return; }
     if (q("[data-gh-disc]")) { S.repo = null; S.github = { hasToken: S.github.hasToken }; saveSettings(); toast("Disconnected from GitHub."); render(); return; }
     if ((el = q("[data-gh-sync]"))) {
-      el.disabled = true;
+      busy(el);
       try { S.github = await write("POST", "/api/github/sync"); toast(S.github.error || "Checked GitHub."); refresh(); } catch (err) { writeFailed(err); }
       render(); return;
     }
-    if (q("[data-gh-token-rm]")) {
+    if ((el = q("[data-gh-token-rm]"))) {
       if (!window.confirm("Remove the GitHub access token? A private repository will stop syncing.")) return;
+      busy(el);
       try { S.github = await write("DELETE", "/api/github/token"); toast("Token removed."); } catch (err) { writeFailed(err); }
       render(); return;
     }
     if ((el = q("[data-reset]"))) {
       const p = F.person(el.dataset.reset);
       if (!window.confirm(`Reset ${p.name}'s password? They will be signed out everywhere.`)) return;
-      try { const r = await write("POST", `/api/users/${p.id}/reset`); showTemp("Password reset", p.name, r.password); } catch (err) { writeFailed(err); }
+      const done = busy(el);
+      try { const r = await write("POST", `/api/users/${p.id}/reset`); showTemp("Password reset", p.name, r.password); } catch (err) { writeFailed(err); } finally { done(); }
       return;
     }
     if ((el = q("[data-act]"))) {
@@ -1155,12 +1347,12 @@
       if (a === "palette") openPalette();
       else if (a === "new") newIssueModal();
       else if (a === "github") githubModal();
-      else if (a === "theme") toggleTheme();
-      else if (a === "logout") logout();
+      else if (a === "theme") vt(toggleTheme);
+      else if (a === "logout") { busy(el, el.querySelector(".n")); logout(); }
       else if (a === "menu") $("#app").classList.toggle("open");
       else if (a === "close-modal") closeModal();
       else if (a === "notif-settings") { S.setTab = "notifications"; go("settings"); }
-      else if (a === "close-issue") go("issues");
+      else if (a === "close-issue") closeIssue();
       else if (a === "new-entry") simpleModal("data-newentry", "New notebook entry", '<input class="in" name="title" placeholder="Title" required maxlength="200" autocomplete="off" aria-label="Title">', "Create entry");
       else if (a === "new-meeting") simpleModal("data-newmeeting", "New meeting", `<input class="in" name="title" placeholder="Title" required maxlength="200" autocomplete="off" aria-label="Title"><div class="fl"><div><label for="nm-d">Date</label><input class="in" id="nm-d" type="date" name="date" value="${F.today}" required></div></div>`, "Create meeting");
       else if (a === "new-phase") simpleModal("data-newphase", "Add phase", `<input class="in" name="name" placeholder="Name, for example Build" required maxlength="100" autocomplete="off" aria-label="Name"><div class="fl"><div><label for="np-s">Starts</label><input class="in" id="np-s" type="date" name="start" value="${F.today}" required></div><div><label for="np-e">Ends</label><input class="in" id="np-e" type="date" name="end" required></div></div>`, "Add phase");
@@ -1187,7 +1379,7 @@
     if (e.key === "Escape") {
       if ($("#ov-modal").classList.contains("show")) closeModal();
       else if (S.route === "pit") go("home");
-      else if (S.route === "issues" && S.arg) go("issues");
+      else if (S.route === "issues" && S.arg) closeIssue();
       return;
     }
     const tag = (e.target.tagName || "").toLowerCase();
@@ -1239,8 +1431,10 @@
     }
     else if (t.matches("[data-member]")) {
       const p = F.person(t.dataset.member), prev = p.access;
+      t.disabled = true;
       try { await write("PATCH", `/api/users/${p.id}`, { access: t.value }); p.access = t.value; toast(`${p.name} is now ${t.value}.`); }
       catch (err) { t.value = prev; toast(err.message); }
+      finally { t.disabled = false; }
     }
     else if (t.matches("[data-pf]")) {
       const p = F.parts.find((x) => x.id === t.dataset.pid); if (!p) return;
@@ -1289,8 +1483,8 @@
     const f = e.target;
     e.preventDefault();
     const d = Object.fromEntries(new FormData(f));
-    const busy = f.querySelector("button:not([type=button])"); if (busy) busy.disabled = true;
-    const done = () => { if (busy) busy.disabled = false; };
+    const done = busy(f.querySelector("button:not([type=button])"));
+    const stale = f.closest("#modal") ? $("#modal .err") : f.querySelector("#auth-err"); if (stale) stale.textContent = "";
     try {
       if (f.matches("[data-login]")) {
         const r = await call("POST", "/api/login", { username: d.username, password: d.password });
