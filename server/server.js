@@ -9,7 +9,10 @@ const host = process.env.HOST ?? "0.0.0.0";
 const demo = process.env.DEMO === "1";
 const dbPath = resolve(process.env.DB_PATH ?? join(root, "data", "008.db"));
 
-const app = createApp({ dbPath, publicDir: join(root, "public"), demo, trustProxy: process.env.TRUST_PROXY === "1" });
+const poll = Number(process.env.GITHUB_POLL_SECONDS ?? 180);
+const githubPollMs = poll > 0 ? Math.max(60, poll) * 1000 : 0;
+
+const app = createApp({ dbPath, publicDir: join(root, "public"), demo, trustProxy: process.env.TRUST_PROXY === "1", githubPollMs });
 
 app.server.listen(port, host, () => {
   const lan = Object.values(networkInterfaces()).flat().find((n) => n && n.family === "IPv4" && !n.internal)?.address;

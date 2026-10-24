@@ -1,7 +1,8 @@
 export class HttpError extends Error {
-  constructor(status, message) {
+  constructor(status, message, extra) {
     super(message);
     this.status = status;
+    this.extra = extra;
   }
 }
 const bad = (m) => new HttpError(400, m);
@@ -10,6 +11,10 @@ const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const validDate = (s) => DATE.test(s) && !Number.isNaN(Date.parse(s + "T00:00:00Z"));
 
 export const SUBS = ["drive", "intake", "lift", "vision", "electronics", "auto", "teleop", "notebook", "outreach", "team"];
+export const SUB_NAMES = {
+  drive: "Drivetrain", intake: "Intake", lift: "Lift", vision: "Vision", electronics: "Electronics",
+  auto: "Autonomous", teleop: "TeleOp", notebook: "Notebook", outreach: "Outreach", team: "Team",
+};
 export const ACCESS = ["Admin", "Member", "Mentor", "Viewer"];
 
 /* Field rules: t = type, plus req / max / min / values / def / of. */
@@ -17,7 +22,7 @@ const str = (max, req = false) => ({ t: "str", max, req });
 const date = (req = false) => ({ t: "date", req });
 const int = (min, max, req = false, def) => ({ t: "int", min, max, req, def });
 const num = (min, max, req = false, def) => ({ t: "num", min, max, req, def });
-const bool = () => ({ t: "bool" });
+const bool = (def = false) => ({ t: "bool", def });
 const oneOf = (values, def) => ({ t: "enum", values, def });
 const strs = (n, max = 64, min = 0) => ({ t: "strs", n, max, min });
 const list = (n, of) => ({ t: "list", n, of });
@@ -37,6 +42,7 @@ export const SPECS = {
     branch: str(200),
     pr: int(0, 1_000_000),
     merged: bool(),
+    prState: oneOf(["none", "draft", "open", "merged", "closed"], "none"),
     logged: bool(),
     notes: list(300, { who: str(64, true), text: str(2000, true), date: date(true) }),
   },
@@ -74,9 +80,11 @@ export const SPECS = {
   },
   milestones: { name: str(100, true), date: date(true), main: bool() },
   phases: { name: str(100, true), start: date(true), end: date(true) },
-  people: { name: str(60, true), role: str(80), hue: int(0, 359, false, 0) },
+  people: { name: str(60, true), role: str(80), hue: int(0, 359, false, 0), gh: str(39) },
   team: { num: str(12, true), name: str(60, true), short: str(8), season: str(20), logo: str(400_000) },
-  settings: { budget: num(0, 10_000_000, false, 0), branchPrefix: str(20), repo: str(100) },
+  settings: { budget: num(0, 10_000_000, false, 0), branchPrefix: str(20), repo: str(100), autoPr: bool(true) },
+  /* Each person's own notification choices. */
+  prefs: { due: bool(true), blocked: bool(true), mention: bool(true), pr: bool(true), digest: bool(false), follow: strs(SUBS.length, 20) },
 };
 
 function one(k, r, v) {
@@ -101,7 +109,7 @@ function one(k, r, v) {
       if (v < r.min || v > r.max) throw bad(`${k} is out of range`);
       return v;
     }
-    case "bool": return v === true;
+    case "bool": return v === undefined || v === null ? r.def : v === true;
     case "enum": {
       if (empty) { if (r.def !== undefined) return r.def; throw bad(`${k} is required`); }
       if (!r.values.includes(v)) throw bad(`${k} is not a valid choice`);
@@ -137,4 +145,6 @@ export function clean(spec, input) {
 }
 
 export const USERNAME = /^[a-z0-9][a-z0-9._-]{1,31}$/i;
+export const GH_LOGIN = /^[a-z\d](?:[a-z\d]|-(?=[a-z\d])){0,38}$/i;
+export const GH_REPO = /^[\w.-]+\/[\w.-]+$/;
 export const isDate = validDate;

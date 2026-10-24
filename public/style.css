@@ -152,6 +152,16 @@ button.chip { cursor: pointer; }
 .dot.ok { background: var(--done); }
 .dot.warn { background: var(--doing); }
 .dot.bad { background: var(--blocked); }
+.dot.new { background: var(--brand); }
+.nav .n.new { color: var(--brand); font-weight: 600; }
+.li.note { align-items: flex-start; text-align: left; }
+.li.note .dot { margin-top: 6px; }
+.li.note .t { white-space: normal; color: var(--dim); }
+.li.note.unread .t { color: var(--text); font-weight: 500; }
+.linkish { color: var(--brand); text-decoration: underline; text-underline-offset: 2px; }
+a.chip:hover { color: var(--text); }
+.chip.pr-merged { color: var(--done); }
+.chip.pr-open { color: var(--review); }
 .si { flex: none; }
 .pri-i { flex: none; }
 .av {
@@ -341,6 +351,17 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 60; display: none; align-items: center; gap: 14px; background: var(--text); color: var(--bg); padding: 9px 14px; border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,.3); }
 #toast.show { display: flex; }
 #toast button { color: var(--bg); font-weight: 600; text-decoration: underline; }
+#mention { position: fixed; z-index: 70; min-width: 280px; max-width: min(380px, calc(100vw - 16px)); margin: 0; padding: 4px; list-style: none; background: var(--raise); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.28); }
+#mention[hidden] { display: none; }
+#mention li { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+#mention li.on { background: var(--tint); }
+#mention li b { font-weight: 500; }
+#mention li .r { margin-left: auto; padding-left: 12px; color: var(--faint); font-size: 12px; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
+#mention .av.team { display: inline-grid; place-items: center; background: var(--side); color: var(--dim); border-radius: 5px; }
+.mention { color: var(--brand); font-weight: 500; }
+.follow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; }
+.follow .chips { margin-top: 0; }
+.tab .cnt { color: var(--brand); font-weight: 600; margin-left: 6px; }
 
 /* pit board */
 .pitwrap { padding: 4vh 5vw; height: 100vh; overflow: auto; display: flex; flex-direction: column; gap: 4vh; }

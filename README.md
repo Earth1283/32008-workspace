@@ -8,6 +8,7 @@ It runs as a single Node process with a SQLite file. There is nothing to install
 
 | Page | What it does |
 |---|---|
+| **Inbox** | Your notifications: assignments, comments, @mentions, blockers, due dates, GitHub review requests and an optional Sunday digest. The sidebar shows how many are unread |
 | **Home** | Days to the qualifier, robot health by subsystem, what's blocked or overdue, your issues. The layout adapts to Captain, Programmer or Builder view |
 | **Issues** | List or board, with a detail panel. Status, priority, assignee, subsystem, due date, blocked-by note, comments and a suggested Git branch name. Drag cards between columns on desktop |
 | **Notebook** | Finishing an issue offers to draft an engineering notebook entry (Problem, What we tried, Result, Next step), pre-filled from the issue and its comments. The sidebar counts finished issues that still have no entry |
@@ -16,7 +17,7 @@ It runs as a single Node process with a SQLite file. There is nothing to install
 | **Practice** | Log auto success and cycle times, with trend charts |
 | **Meetings** | Agenda, notes, attendees and action items. An action item becomes an issue in one click |
 | **Pit board** | Large type for glancing at from across the pit: countdown, subsystem health, blockers |
-| **Settings** | Profile, team identity and logo, theme and accent color, density, members and access, GitHub |
+| **Settings** | Profile, team identity and logo, theme and accent color, density, which notifications you get, members and access, GitHub |
 
 Changes show up on teammates' screens within a moment, with no refresh.
 
@@ -50,6 +51,17 @@ Set these as environment variables.
 | `DB_PATH` | `data/008.db` | |
 | `DEMO` | unset | `1` seeds sample data into an empty database |
 | `TRUST_PROXY` | unset | `1` behind a reverse proxy, so login lockouts follow each real client |
+| `TZ` | the system's | The team's time zone, for example `America/New_York`. Decides when "due tomorrow" and the Sunday digest go out. Docker containers default to UTC |
+| `GITHUB_POLL_SECONDS` | `180` | How often to check GitHub for pull requests. At least 60. `0` turns the timer off (Check now in Settings still works) |
+
+## GitHub
+
+An admin connects the repository in Settings, Integrations. The server then checks its pull requests every few minutes. There's no webhook, so it works on a server the internet can't reach. It only needs to make outgoing requests to `api.github.com`.
+
+- A pull request links to an issue when its branch uses the suggested name (`ftc-42-...`) or its title contains `FTC-42`.
+- With **Move issues with pull requests** on, opening a PR sets the issue to In review and merging sets it to Done. This happens only when the PR changes, so moving an issue back by hand sticks.
+- People who add their GitHub username in Settings, Profile get review requests in their inbox.
+- A public repo needs no token. For a private one, create a [fine-grained token](https://github.com/settings/personal-access-tokens/new) for that repository with read-only **Pull requests** access and paste it into Settings. It is stored on the server and never sent to browsers or included in the JSON export. Database backups do contain it.
 
 ## People and access
 
@@ -92,6 +104,8 @@ server/   server.js   entry point
           db.js       SQLite schema and document store
           validate.js the data schema: only listed fields are kept, each type- and length-checked
           auth.js     password hashing, tokens, login throttle
+          notify.js   the inbox: who hears about what, due-date and digest checks
+          github.js   pull request sync
           admin.js    operator commands
           demo.js     sample data loader
 public/   the app: index.html, app.js, data.js, style.css, theme.js (no build step)
@@ -109,18 +123,21 @@ All routes are under `/api` and need a session, except `session`, `login` and `s
 |---|---|
 | `GET /session`, `POST /login`, `POST /logout`, `POST /setup`, `POST /password` | Sessions and first-run setup |
 | `GET /state` | Everything the app needs, in one response |
-| `POST /<collection>`, `PUT /<collection>/<id>`, `DELETE /<collection>/<id>` | Create, replace, delete. Collections: `issues`, `notebook`, `practice`, `meetings`, `parts`, `milestones`, `phases` |
+| `POST /<collection>`, `PUT /<collection>/<id>`, `DELETE /<collection>/<id>` | Create, replace, delete. Collections: `issues`, `notebook`, `practice`, `meetings`, `parts`, `milestones`, `phases`. Every record carries a `rev`. Send it back with a `PUT` and the save is refused with `409` and the current copy if someone saved first; leave it out and last write wins |
 | `PUT /meta/team`, `PUT /meta/settings` | Team identity and settings (admin) |
 | `PATCH /people/<id>` | Your own name and role, or anyone's if admin |
 | `POST /users`, `PATCH /users/<id>`, `POST /users/<id>/reset` | Members and access (admin) |
-| `GET /events` | Server-sent events: tells other clients something changed |
+| `GET /events` | Server-sent events: tells other clients something changed, and tells you when your inbox changed |
+| `PUT /prefs` | Your notification choices |
+| `POST /notifications/read` | Mark `{ "ids": [...] }` or `{ "all": true }` as read. Your inbox comes with `GET /state` |
+| `POST /github/sync`, `PUT /github/token`, `DELETE /github/token` | Check GitHub now, save or remove the access token (admin) |
 | `GET /export` | JSON backup (admin) |
 
 ## Development
 
 ```sh
 npm install        # only needed for the UI tests (jsdom)
-npm test           # 17 tests: API, admin tools, and the real UI driven against the real server
+npm test           # 25 tests: API, admin tools, and the real UI driven against the real server
 ```
 
 The tests start the server in-process on a random port with an in-memory database, so they never touch `data/`.
@@ -128,9 +145,9 @@ The tests start the server in-process on a random port with an in-memory databas
 ## Known limits
 
 - **Plain HTTP** unless you put a reverse proxy with TLS in front of it.
-- **Last write wins** when two people change the same field of the same record at the same moment.
-- **GitHub** support is limited to saving the repo name and suggesting branch names. Live branch and pull request sync isn't built.
-- **Notifications** are saved as per-device preferences. Nothing is sent yet.
+- **Simultaneous edits merge** field by field, and comments, attendees, agenda and action items merge item by item. Only when two people change the same field at the same moment does the later save win, and that person is told.
+- **GitHub** sync is up to a few minutes behind, and reads the 50 most recently updated pull requests on each check.
+- **Notifications** appear in the app only. Nothing is emailed or pushed to phones.
 - **Accounts can't be deleted**, because their names appear on past work. Set them to Viewer instead.
 - **No import.** The JSON export is for reading and archiving. Recover from database backups.
 - Fonts load from Google Fonts and fall back to system fonts offline.

@@ -7,8 +7,11 @@ services:
     volumes:
       - workspace-data:/app/data
     restart: unless-stopped
-    # Uncomment to start with sample data on an empty database:
+    # Uncomment environment: and the lines you need.
+    # TZ is your team's time zone, so due-date reminders and the Sunday digest go out on the right day
+    # (without it the container uses UTC). DEMO starts with sample data on an empty database.
     # environment:
+    #   TZ: "America/New_York"
     #   DEMO: "1"
 
 volumes:

@@ -263,6 +263,10 @@ Test a restore once, before you need it.
 
 **Logs.** `docker compose logs -f`, or `journalctl -u 008-workspace -f`.
 
+**Time zone.** Set `TZ` to the team's time zone, for example `America/New_York`. For Docker, uncomment it in `docker-compose.yml`. For systemd, add it to the `Environment=` line. It decides which day "due tomorrow" reminders and the Sunday digest go out.
+
+**GitHub.** Sync needs outgoing HTTPS to `api.github.com` and nothing incoming. If it fails, Settings, Integrations shows why.
+
 **Admin commands**
 
 | Command | What it does |

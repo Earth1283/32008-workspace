@@ -3,9 +3,11 @@ import { randomBytes } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize, sep } from "node:path";
 import { openDb, makeStore, tx } from "./db.js";
-import { HttpError, SPECS, ACCESS, USERNAME, clean } from "./validate.js";
+import { HttpError, SPECS, ACCESS, USERNAME, GH_LOGIN, GH_REPO, SUBS, clean } from "./validate.js";
 import { hashPassword, checkPassword, DUMMY_HASH, newToken, sha256, tempPassword, parseCookies, makeThrottle } from "./auth.js";
 import { seedDemo, DEMO_PASSWORD } from "./demo.js";
+import { makeNotifier, localDate } from "./notify.js";
+import { makeGithub } from "./github.js";
 
 const SESSION_SECONDS = 30 * 24 * 3600;
 const DOC_COLLS = {
@@ -53,31 +55,42 @@ function readJson(req, limit = 1_000_000) {
 }
 
 const hueOf = (s) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => localDate();
 
-export function createApp({ dbPath = "data/008.db", publicDir, demo = false, trustProxy = false } = {}) {
+export function createApp({ dbPath = "data/008.db", publicDir, demo = false, trustProxy = false, githubFetch, githubApi, githubPollMs = 180_000 } = {}) {
   const db = openDb(dbPath);
   const store = makeStore(db);
   const throttle = makeThrottle();
-  const clients = new Set();
+  const clients = new Map(); // event stream -> user id
   let demoLogins = null;
   let closing = false, inflight = 0;
 
   const userCount = () => db.prepare("SELECT COUNT(*) AS n FROM users").get().n;
   if (demo && userCount() === 0) demoLogins = seedDemo(db, store, today());
 
+  const broadcast = (coll, by) => {
+    const msg = `event: change\ndata: ${JSON.stringify({ coll, by })}\n\n`;
+    for (const c of clients.keys()) c.write(msg);
+  };
+  /** Tell one person's open tabs that their inbox changed. */
+  const push = (userId, by) => {
+    const msg = `event: change\ndata: ${JSON.stringify({ coll: "notifications", by })}\n\n`;
+    for (const [c, u] of clients) if (u === userId) c.write(msg);
+  };
+  const notifier = makeNotifier({ db, store, push });
+  const github = makeGithub({ db, store, notifier, broadcast, fetch: githubFetch, api: githubApi });
+  const safely = (fn) => () => { try { const r = fn(); if (r && r.catch) r.catch((e) => console.error(e)); } catch (e) { console.error(e); } };
+
   const purge = () => db.prepare("DELETE FROM sessions WHERE expires_at < ?").run(Date.now());
   purge();
   const timers = [
     setInterval(purge, 3600_000),
-    setInterval(() => { for (const c of clients) c.write(": ping\n\n"); }, 25_000),
+    setInterval(() => { for (const c of clients.keys()) c.write(": ping\n\n"); }, 25_000),
+    setInterval(safely(() => notifier.tick()), 15 * 60_000),
+    setTimeout(safely(() => notifier.tick()), 5_000),
+    ...(githubPollMs ? [setInterval(safely(() => github.sync()), githubPollMs), setTimeout(safely(() => github.sync()), 5_000)] : []),
   ];
   timers.forEach((t) => t.unref());
-
-  const broadcast = (coll, by) => {
-    const msg = `event: change\ndata: ${JSON.stringify({ coll, by })}\n\n`;
-    for (const c of clients) c.write(msg);
-  };
 
   /** Address used for login throttling. Only believe X-Forwarded-For when a trusted proxy sets it. */
   function clientIp(req) {
@@ -144,16 +157,20 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
   /* ---------- state ---------- */
   function buildState(user) {
     const accessRows = new Map(db.prepare("SELECT id, access, username FROM users").all().map((u) => [u.id, u]));
+    const handles = notifier.handles();
     const out = {
       me: publicUser(user),
       team: store.meta("team", {}),
       settings: store.meta("settings", { budget: 0, branchPrefix: "ftc", repo: "" }),
       people: store.list("people").map((p) => ({
-        ...p, access: accessRows.get(p.id)?.access ?? "Member",
+        ...p, access: accessRows.get(p.id)?.access ?? "Member", handle: handles.get(p.id),
         ...(user.access === "Admin" ? { username: accessRows.get(p.id)?.username } : {}),
       })),
     };
     for (const c of Object.keys(DOC_COLLS)) out[c] = store.list(c);
+    out.prefs = notifier.prefs(user.id);
+    out.inbox = notifier.list(user.id);
+    out.github = { ...store.meta("githubStatus", {}), hasToken: !!store.meta("github", {}).token };
     return out;
   }
 
@@ -233,7 +250,7 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
     if (a === "events" && m === "GET") {
       res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", Connection: "keep-alive", "X-Accel-Buffering": "no" });
       res.write(": connected\n\n");
-      clients.add(res);
+      clients.set(res, user.id);
       req.on("close", () => clients.delete(res));
       return;
     }
@@ -253,9 +270,45 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
       need(user, "admin");
       const doc = clean(SPECS[b], await readJson(req, 1_500_000));
       if (b === "team" && doc.logo && !doc.logo.startsWith("data:image/")) throw new HttpError(400, "Logo must be an image");
+      if (b === "settings" && doc.repo && !GH_REPO.test(doc.repo)) throw new HttpError(400, "Repository must look like owner/repo");
+      const prev = store.meta(b, {});
       store.setMeta(b, doc);
       broadcast("meta", req.headers["x-client"]);
+      if (b === "settings" && (prev.repo !== doc.repo || prev.branchPrefix !== doc.branchPrefix)) {
+        if (!doc.repo) store.setMeta("githubStatus", {});
+        safely(() => github.sync())();
+      }
       return json(res, 200, doc);
+    }
+
+    if (a === "prefs" && !b && m === "PUT") {
+      const doc = clean(SPECS.prefs, await readJson(req));
+      doc.follow = [...new Set(doc.follow)].filter((s) => SUBS.includes(s));
+      store.put("prefs", user.id, doc, user.id);
+      return json(res, 200, notifier.prefs(user.id));
+    }
+
+    if (a === "notifications" && b === "read" && m === "POST") {
+      const body = await readJson(req);
+      const ids = body.all === true ? "all" : Array.isArray(body.ids) ? body.ids.filter(Number.isInteger).slice(0, 500) : [];
+      const n = notifier.markRead(user.id, ids);
+      if (n) push(user.id, req.headers["x-client"]);
+      return json(res, 200, { ok: true, marked: n });
+    }
+
+    if (a === "github") {
+      need(user, "admin");
+      if (b === "token" && m === "PUT") {
+        const { token } = await readJson(req);
+        if (typeof token !== "string" || !/^[\w-]{20,255}$/.test(token.trim())) throw new HttpError(400, "That doesn't look like a GitHub token");
+        store.setMeta("github", { token: token.trim() });
+      } else if (b === "token" && m === "DELETE") {
+        store.setMeta("github", {});
+      } else if (!(b === "sync" && m === "POST")) throw new HttpError(404, "Not found");
+      github.forget();
+      const status = await github.sync();
+      broadcast("meta", req.headers["x-client"]);
+      return json(res, 200, { ...(status ?? store.meta("githubStatus", {})), hasToken: !!store.meta("github", {}).token });
     }
 
     if (a === "people" && b && m === "PATCH") {
@@ -263,7 +316,9 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
       const cur = store.get("people", b);
       if (!cur) throw new HttpError(404, "No such person");
       const body = await readJson(req);
-      const doc = clean(SPECS.people, { ...cur, name: body.name ?? cur.name, role: body.role ?? cur.role });
+      const gh = String(body.gh ?? cur.gh ?? "").trim().replace(/^@/, "");
+      if (gh && !GH_LOGIN.test(gh)) throw new HttpError(400, "That isn't a valid GitHub username");
+      const doc = clean(SPECS.people, { ...cur, name: body.name ?? cur.name, role: body.role ?? cur.role, gh });
       store.put("people", b, doc, user.id);
       broadcast("people", req.headers["x-client"]);
       return json(res, 200, { ...doc, id: b });
@@ -308,15 +363,28 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
           return id;
         });
         broadcast(a, req.headers["x-client"]);
-        return json(res, 201, store.get(a, id));
+        const saved = store.get(a, id);
+        safely(() => notifier.changed(a, null, saved, user.id))();
+        return json(res, 201, saved);
       }
       if (b && m === "PUT") {
         need(user, cfg.write);
         if (!store.get(a, b)) throw new HttpError(404, "Not found");
-        const doc = clean(SPECS[a], await readJson(req));
-        store.put(a, b, doc, user.id);
+        const body = await readJson(req);
+        const doc = clean(SPECS[a], body);
+        // With rev, the save only applies to the version the client last saw. Without it, last write wins.
+        if (body.rev !== undefined && !Number.isInteger(body.rev)) throw new HttpError(400, "rev must be a whole number");
+        let before;
+        const saved = tx(db, () => {
+          before = store.get(a, b);
+          if (!before) throw new HttpError(404, "Not found");
+          if (body.rev !== undefined && body.rev !== before.rev) throw new HttpError(409, "Someone else changed this first", { current: before });
+          store.put(a, b, doc, user.id);
+          return store.get(a, b);
+        });
         broadcast(a, req.headers["x-client"]);
-        return json(res, 200, store.get(a, b));
+        safely(() => notifier.changed(a, before, saved, user.id))();
+        return json(res, 200, saved);
       }
       if (b && m === "DELETE") {
         need(user, cfg.del);
@@ -358,7 +426,7 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
       else await serveStatic(req, res, url);
     } catch (e) {
       if (e instanceof HttpError) {
-        if (!res.headersSent) json(res, e.status, { error: e.message });
+        if (!res.headersSent) json(res, e.status, { ...e.extra, error: e.message });
       } else {
         console.error(e);
         if (!res.headersSent) json(res, 500, { error: "Something went wrong on the server" });
@@ -367,11 +435,12 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
   });
 
   return {
-    server, db, store, demoLogins,
+    server, db, store, demoLogins, notifier, github,
     async close() {
       closing = true;
       timers.forEach(clearInterval);
-      for (const c of clients) c.end();
+      for (const c of clients.keys()) c.end();
+      await github.idle();
       const stopped = new Promise((r) => server.close(r));
       server.closeAllConnections?.();
       await stopped;

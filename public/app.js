@@ -11,7 +11,8 @@
     nbSel: null, mtSel: null,
     toastTimer: null, g: 0,
     setTab: "profile", density: "comfortable", accent: "",
-    prefs: { due: true, blocked: true, mention: true, pr: true, digest: false },
+    prefs: { due: true, blocked: true, mention: true, pr: true, digest: false, follow: [] },
+    inbox: [], github: {}, autoPr: true, iboxTab: "you",
   };
   const ACCENTS = [["", "Steel blue", "#1A6FA8"], ["#38BDF8", "Sky", "#38BDF8"], ["#14B8A6", "Teal", "#14B8A6"], ["#22A06B", "Green", "#22A06B"],
     ["#E5A93B", "Amber", "#E5A93B"], ["#F07A3C", "Orange", "#F07A3C"], ["#E5484D", "Red", "#E5484D"], ["#8B9099", "Graphite", "#8B9099"]];
@@ -23,11 +24,10 @@
       const u = JSON.parse(localStorage.getItem(UI_KEY) || "{}");
       if (["captain", "programmer", "builder"].includes(u.role)) S.role = u.role;
       if (["comfortable", "compact"].includes(u.density)) S.density = u.density;
-      if (u.prefs && typeof u.prefs === "object") S.prefs = { ...S.prefs, ...u.prefs };
       if (u.mode === "board" || u.mode === "list") S.mode = u.mode;
     } catch (e) { /* ignore */ }
   }
-  const saveUi = () => { try { localStorage.setItem(UI_KEY, JSON.stringify({ role: S.role, density: S.density, prefs: S.prefs, mode: S.mode })); } catch (e) { /* ignore */ } };
+  const saveUi = () => { try { localStorage.setItem(UI_KEY, JSON.stringify({ role: S.role, density: S.density, mode: S.mode })); } catch (e) { /* ignore */ } };
 
   /* ---------- server access ---------- */
   const CLIENT = Math.random().toString(36).slice(2, 10);
@@ -44,30 +44,100 @@
     if (!r.ok) {
       const err = new Error((data && data.error) || r.statusText || "Request failed");
       err.status = r.status;
+      err.data = data;
       if (r.status === 401 && S.ready) sessionEnded();
       throw err;
     }
     return data;
   }
-  function write(method, url, body) {
-    const p = call(method, url, body);
+  function track(p) {
     const tracked = p.catch(() => {});
     pending.add(tracked);
     tracked.then(() => pending.delete(tracked));
     return p;
   }
+  const write = (method, url, body) => track(call(method, url, body));
   function writeFailed(e) {
     if (e.status === 401) return;
     toast(e.message || "Could not save that change");
     refresh();
   }
-  const persist = (coll, doc) => { clearTimeout(timers.get(coll + doc.id)); return write("PUT", `/api/${coll}/${doc.id}`, doc).catch(writeFailed); };
+
+  /* ---------- saving documents ----------
+     Each document carries the rev it was loaded at. The server refuses a save made from an
+     older rev (409) and returns its current copy; we then redo our edits on top of that copy. */
+  const base = new WeakMap(); // document object -> the server copy it was last in step with
+  const remember = (doc) => base.set(doc, JSON.parse(JSON.stringify(doc)));
+  /** Array fields where teammates add and remove items independently, merged item by item. */
+  const SETS = { issues: ["notes"], meetings: ["who", "agenda", "actions"] };
+  const stable = (x) => (x && typeof x === "object" && !Array.isArray(x) ? JSON.stringify(Object.keys(x).sort().map((k) => [k, x[k]])) : JSON.stringify(x));
+  const ident = (x) => (x && typeof x === "object" && "id" in x ? "id:" + x.id : "v:" + stable(x));
+
+  /** Three-way merge: start from theirs, then reapply every field we changed since was. */
+  function merge(was, mine, theirs, sets) {
+    const out = { ...theirs };
+    let clobbered = false;
+    for (const k of new Set([...Object.keys(was), ...Object.keys(mine)])) {
+      if (k === "id" || k === "rev" || stable(was[k]) === stable(mine[k])) continue;
+      if (sets.includes(k) && Array.isArray(mine[k])) {
+        const old = new Map((was[k] || []).map((x) => [ident(x), x]));
+        const now = new Map(mine[k].map((x) => [ident(x), x]));
+        const list = (theirs[k] || [])
+          .filter((x) => !(old.has(ident(x)) && !now.has(ident(x))))
+          .map((x) => { const m = now.get(ident(x)); return m && stable(m) !== stable(old.get(ident(x))) ? m : x; });
+        const seen = new Set(list.map(ident));
+        for (const x of mine[k]) if (!old.has(ident(x)) && !seen.has(ident(x))) list.push(x);
+        out[k] = list;
+      } else {
+        if (stable(theirs[k]) !== stable(was[k]) && stable(theirs[k]) !== stable(mine[k])) clobbered = true;
+        out[k] = mine[k];
+      }
+    }
+    return { doc: out, clobbered };
+  }
+
+  async function save(coll, doc) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const r = await call("PUT", `/api/${coll}/${doc.id}`, doc);
+        doc.rev = r.rev;
+        base.set(doc, r);
+        return r;
+      } catch (e) {
+        const cur = e.status === 409 && e.data && e.data.current;
+        if (!cur || attempt >= 3) throw e;
+        const { doc: merged, clobbered } = merge(base.get(doc) || {}, doc, cur, SETS[coll] || []);
+        for (const k of Object.keys(doc)) if (!(k in merged)) delete doc[k];
+        Object.assign(doc, merged);
+        base.set(doc, cur);
+        if (clobbered) toast("A teammate edited this at the same time. Where you both changed the same thing, your version was kept.");
+        refreshSoon();
+      }
+    }
+  }
+  const queues = new Map();
+  /** Save a document. Saves of the same document go one at a time, so we never race ourselves. */
+  function persist(coll, doc) {
+    const key = coll + doc.id;
+    clearTimeout(timers.get(key));
+    const p = (queues.get(key) || Promise.resolve()).then(() => save(coll, doc));
+    const settled = p.catch(() => {});
+    queues.set(key, settled);
+    settled.then(() => { if (queues.get(key) === settled) queues.delete(key); });
+    return track(p).catch(writeFailed);
+  }
   const timers = new Map();
   const soon = (key, fn, ms = 450) => { clearTimeout(timers.get(key)); timers.set(key, setTimeout(() => { timers.delete(key); fn(); }, ms)); };
   const persistSoon = (coll, doc) => soon(coll + doc.id, () => persist(coll, doc));
   const saveTeam = () => write("PUT", "/api/meta/team", F.team).catch(writeFailed);
-  const saveSettings = () => write("PUT", "/api/meta/settings", { budget: F.budget, branchPrefix: S.branchPrefix, repo: S.repo || "" }).catch(writeFailed);
-  const saveMe = () => { const p = F.person(F.me); return write("PATCH", `/api/people/${F.me}`, { name: p.name, role: p.role }).catch(writeFailed); };
+  const saveSettings = () => write("PUT", "/api/meta/settings", { budget: F.budget, branchPrefix: S.branchPrefix, repo: S.repo || "", autoPr: S.autoPr }).catch(writeFailed);
+  const saveMe = () => { const p = F.person(F.me); return write("PATCH", `/api/people/${F.me}`, { name: p.name, role: p.role, gh: p.gh || "" }).catch(writeFailed); };
+  const savePrefs = () => write("PUT", "/api/prefs", S.prefs).catch(writeFailed);
+  function markRead(ids) {
+    const all = ids === "all";
+    for (const n of S.inbox) if (all || ids.includes(n.id)) n.read = true;
+    return write("POST", "/api/notifications/read", all ? { all: true } : { ids }).catch(writeFailed);
+  }
 
   const SORT = {
     practice: (a, b) => a.date.localeCompare(b.date),
@@ -77,6 +147,7 @@
   };
   async function create(coll, doc) {
     const r = await write("POST", `/api/${coll}`, doc);
+    remember(r);
     F[coll].push(r);
     if (SORT[coll]) F[coll].sort(SORT[coll]);
     return r;
@@ -93,7 +164,12 @@
     F.budget = st.settings.budget || 0;
     S.branchPrefix = st.settings.branchPrefix || "ftc";
     S.repo = st.settings.repo || null;
-    for (const k of ["people", "milestones", "phases", "issues", "parts", "practice", "meetings", "notebook"]) F[k] = st[k];
+    S.autoPr = st.settings.autoPr !== false;
+    S.prefs = st.prefs;
+    S.inbox = st.inbox;
+    S.github = st.github || {};
+    F.people = st.people;
+    for (const k of ["milestones", "phases", "issues", "parts", "practice", "meetings", "notebook"]) { F[k] = st[k]; F[k].forEach(remember); }
   }
   async function refresh() {
     if (!S.ready) return;
@@ -124,6 +200,15 @@
     ? `<span class="logo img" style="background-image:url('${esc(F.team.logo)}')">${esc(F.team.short)}</span>`
     : `<span class="logo">${esc(F.team.short || "008")}</span>`;
   const isAdmin = () => !!S.user && S.user.access === "Admin";
+  const canWrite = () => !!S.user && S.user.access !== "Viewer";
+  /** Controls that only make sense for someone who can change things. Removed for viewers. */
+  const WRITE_ONLY = '[data-write], [data-act="new"], [data-act^="new-"], [data-rm], [data-draft], [data-finalize], [data-mkissue], [data-agenda-rm], [data-action-rm], form[data-cmt], form[data-agenda], form[data-action], form[data-addpart]';
+  function lockPage() {
+    const page = $("#page");
+    page.querySelectorAll(WRITE_ONLY).forEach((el) => el.remove());
+    page.querySelectorAll("input, textarea, select, [data-attend]").forEach((el) => { if (!el.matches("[data-subf]")) el.disabled = true; });
+    page.querySelectorAll("[data-drag]").forEach((el) => { el.draggable = false; });
+  }
   const renderSide = () => { $("#side").innerHTML = sideHtml(); };
   function applyAccent(hex) {
     const r = document.documentElement.style;
@@ -149,6 +234,18 @@
   const mine = () => F.issues.filter((i) => i.who.includes(F.me) && isOpen(i));
   const blocked = () => F.issues.filter((i) => i.status === "blocked");
   const qualifier = () => F.milestones.find((m) => m.main);
+  const isTeam = (n) => n.kind === "team";
+  const unread = () => S.inbox.filter((n) => !n.read && !isTeam(n)).length;
+  const unreadTeam = () => S.inbox.filter((n) => !n.read && isTeam(n)).length;
+  const prState = (i) => (i.prState && i.prState !== "none" ? i.prState : i.merged ? "merged" : i.pr ? "open" : null);
+  const prUrl = (i) => (S.repo && i.pr ? `https://github.com/${S.repo}/pull/${i.pr}` : null);
+  const ago = (ms) => {
+    const m = Math.round((Date.now() - ms) / 60000);
+    if (m < 1) return "just now";
+    if (m < 60) return m + " min ago";
+    if (m < 24 * 60) return Math.round(m / 60) + " h ago";
+    return F.fmt(F.iso(new Date(ms)));
+  };
   const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   const branchName = (i) => `${S.branchPrefix || "ftc"}-${i.id}-${slug(i.title).slice(0, 30).replace(/-$/, "")}`;
   const typeFor = (sub) => (["auto", "teleop", "vision"].includes(sub) ? "code" : sub === "notebook" ? "notebook" : sub === "outreach" ? "outreach" : "build");
@@ -189,6 +286,7 @@
     meetings: '<circle cx="6" cy="6" r="2"/><circle cx="11" cy="7" r="1.6"/><path d="M2 13c.3-2 1.8-3.2 4-3.2s3.7 1.2 4 3.2M10.5 10c1.6 0 2.8.9 3.1 2.6"/>',
     pit: '<rect x="2" y="3" width="12" height="8.5" rx="1.5"/><path d="M6 14h4"/>',
     search: '<circle cx="7" cy="7" r="4"/><path d="m10 10 3.5 3.5"/>',
+    inbox: '<path d="M2 9.5 3.8 3.4a1 1 0 0 1 1-.7h6.4a1 1 0 0 1 1 .7L14 9.5V13a.5.5 0 0 1-.5.5h-11A.5.5 0 0 1 2 13Z"/><path d="M2 9.5h3.5l1 1.5h3l1-1.5H14"/>',
     gear: '<path d="M6.77 3.05L6.97 1.48L9.03 1.48L9.23 3.05L10.63 3.63L11.88 2.66L13.34 4.12L12.37 5.37L12.95 6.77L14.52 6.97L14.52 9.03L12.95 9.23L12.37 10.63L13.34 11.88L11.88 13.34L10.63 12.37L9.23 12.95L9.03 14.52L6.97 14.52L6.77 12.95L5.37 12.37L4.12 13.34L2.66 11.88L3.63 10.63L3.05 9.23L1.48 9.03L1.48 6.97L3.05 6.77L3.63 5.37L2.66 4.12L4.12 2.66L5.37 3.63Z"/><circle cx="8" cy="8" r="2.1"/>',
     git: '<circle cx="4.5" cy="4" r="1.6"/><circle cx="4.5" cy="12" r="1.6"/><circle cx="11.5" cy="6.5" r="1.6"/><path d="M4.5 5.6v4.8M11.5 8.1c0 2-3 1.6-6.4 2.6"/>',
   };
@@ -202,6 +300,18 @@
     return `<span class="chip ${cls}">${F.fmt(i.due)}</span>`;
   };
   const dot = (s) => `<span class="dot ${s}"></span>`;
+  /** Escaped text with @mentions of real people and teams highlighted. */
+  function mentionHtml(text) {
+    const who = new Map(F.people.filter((p) => p.handle).map((p) => [p.handle, p.name]));
+    for (const [k, v] of Object.entries(F.subs)) if (!who.has(k)) who.set(k, v + " team");
+    return esc(text).replace(/(^|[^\w@])@([a-z0-9][a-z0-9._-]{0,31})/gi, (m, pre, h) => {
+      const k = h.toLowerCase(), base = k.replace(/[._-]+$/, ""), hit = who.has(k) ? k : who.has(base) ? base : null;
+      if (!hit) return m;
+      return `${pre}<span class="mention" title="${esc(who.get(hit))}">@${h.slice(0, hit.length)}</span>${h.slice(hit.length)}`;
+    });
+  }
+  /** For fields with the @ menu. Browser autofill and password managers stay out, so their dropdowns never cover it. */
+  const MENTION_ATTRS = 'data-mention aria-autocomplete="list" aria-controls="mention" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other"';
 
   /* ---------- routing ---------- */
   const go = (path) => {
@@ -211,10 +321,12 @@
   const parseHash = () => {
     const [r, a] = (location.hash.replace(/^#\/?/, "") || "home").split("/");
     S.route = r || "home"; S.arg = a || null;
+    if (S.arg && S.route === "meetings") S.mtSel = S.arg;
+    if (S.arg && S.route === "notebook") S.nbSel = S.arg;
   };
 
   /* ---------- sidebar ---------- */
-  const NAV = [["home", "Home", "home"], ["mine", "My issues", "me"], ["issues", "Issues", "issues"]];
+  const NAV = [["home", "Home", "home"], ["inbox", "Inbox", "inbox"], ["mine", "My issues", "me"], ["issues", "Issues", "issues"]];
   const NAV2 = [["season", "Season", "season"], ["notebook", "Notebook", "notebook"], ["parts", "Parts", "parts"], ["practice", "Practice", "practice"], ["meetings", "Meetings", "meetings"]];
   const sideHtml = () => {
     const onIssues = S.route === "issues";
@@ -224,9 +336,9 @@
     };
     const nbDebt = debt().length;
     return `
-      <div class="ws">${logoHtml()}<div><b>${esc(F.team.num)} ${esc(F.team.name)}</b><small>${esc(F.team.season)}${F.team.season ? " season" : ""}</small></div></div>
+      <div class="ws">${logoHtml()}<div><b>${esc(F.team.num)} ${esc(F.team.name)}</b><small>${esc(F.team.season)}${F.team.season ? " season" : ""}${canWrite() ? "" : `${F.team.season ? " · " : ""}View only`}</small></div></div>
       <button class="search" data-act="palette">${ico("search")}Search<kbd>Ctrl K</kbd></button>
-      ${NAV.map((n) => navBtn(n, n[0] === "mine" ? `<span class="n">${mine().length}</span>` : "")).join("")}
+      ${NAV.map((n) => navBtn(n, n[0] === "mine" ? `<span class="n">${mine().length}</span>` : n[0] === "inbox" ? (unread() ? `<span class="n new">${unread()}</span>` : unreadTeam() ? `<span class="n" title="Unread in Teams">${unreadTeam()}</span>` : "") : "")).join("")}
       <div class="grp">Team</div>
       ${NAV2.map((n) => navBtn(n, n[0] === "notebook" && nbDebt ? `<span class="n alert">${nbDebt}</span>` : "")).join("")}
       <div class="grp">Subsystems</div>
@@ -296,25 +408,28 @@
           <span>Subsystem</span>${sel("sub", Object.entries(F.subs), i.sub)}
           <span>Due</span><input type="date" data-field="due" data-id="${i.id}" value="${i.due || ""}" aria-label="Due date">
         </div>
-        ${i.status === "blocked" ? `<div class="callout"><b>Blocked</b><textarea class="in" rows="2" data-blockedby="${i.id}" placeholder="What is it waiting on?" aria-label="Blocked by">${esc(i.blockedBy || "")}</textarea></div>` : ""}
-        <div class="sec"><h3>Description</h3><textarea class="in" rows="${i.desc ? 4 : 2}" data-desc="${i.id}" placeholder="Add details" aria-label="Description">${esc(i.desc || "")}</textarea></div>
+        ${i.status === "blocked" ? `<div class="callout"><b>Blocked</b><textarea class="in" rows="2" data-blockedby="${i.id}" placeholder="What is it waiting on?" aria-label="Blocked by" ${MENTION_ATTRS}>${esc(i.blockedBy || "")}</textarea></div>` : ""}
+        <div class="sec"><h3>Description</h3><textarea class="in" rows="${i.desc ? 4 : 2}" data-desc="${i.id}" placeholder="Add details" aria-label="Description" ${MENTION_ATTRS}>${esc(i.desc || "")}</textarea></div>
         <div class="sec"><h3>GitHub</h3>${gitBlock(i)}</div>
         ${i.status === "done" ? `<div class="sec"><h3>Notebook</h3>${i.logged
           ? `<p class="dim">Logged in the engineering notebook.</p>`
           : `<div class="git"><span class="dim" style="flex:1">No notebook entry yet.</span><button class="btn pri" data-draft="${i.id}">Draft entry</button></div>`}</div>` : ""}
         <div class="sec"><h3>Activity</h3>
-          ${act.map((a) => `<div class="act">${av(a.who)}<div><p>${a.text.startsWith("created") ? `<b>${esc(F.person(a.who).name)}</b> ${esc(a.text)}` : esc(a.text)}</p><small>${F.fmt(a.date)}${a.text.startsWith("created") ? "" : " · " + esc(F.person(a.who).name)}</small></div></div>`).join("")}
-          <form class="cmt" data-cmt="${i.id}"><input class="in" name="t" placeholder="Leave a comment" autocomplete="off"><button class="btn">Send</button></form>
+          ${act.map((a) => `<div class="act">${av(a.who)}<div><p>${a.text.startsWith("created") ? `<b>${esc(F.person(a.who).name)}</b> ${esc(a.text)}` : mentionHtml(a.text)}</p><small>${F.fmt(a.date)}${a.text.startsWith("created") ? "" : " · " + esc(F.person(a.who).name)}</small></div></div>`).join("")}
+          <form class="cmt" data-cmt="${i.id}" autocomplete="off"><input class="in" name="t" placeholder="Leave a comment. Type @ to mention someone" aria-label="Comment" ${MENTION_ATTRS}><button class="btn">Send</button></form>
         </div>
         ${isAdmin() ? `<div class="sec"><button class="btn ghost" data-rm="issues:${i.id}">Delete issue</button></div>` : ""}
       </aside>`;
   };
+  const PR_LABEL = { draft: "Draft", open: "Open", merged: "Merged", closed: "Closed" };
   const gitBlock = (i) => {
-    if (i.branch) {
-      return `<div class="git">${ico("git")}<span class="mono">${esc(i.branch)}</span><span class="chip" style="margin-left:auto">${i.merged ? "Merged" : i.pr ? "PR #" + i.pr + " open" : "Branch only"}</span></div>`;
+    if (i.branch || i.pr) {
+      const st = prState(i), url = prUrl(i);
+      const pr = i.pr ? (url ? `<a class="chip" href="${esc(url)}" target="_blank" rel="noopener">PR #${i.pr}</a>` : `<span class="chip">PR #${i.pr}</span>`) : "";
+      return `<div class="git">${ico("git")}<span class="mono">${esc(i.branch || "")}</span><span style="margin-left:auto;display:flex;gap:6px">${pr}<span class="chip pr-${st || "none"}">${st ? PR_LABEL[st] : "Branch only"}</span></span></div>`;
     }
     return `<div class="git">${ico("git")}<span class="mono">${esc(branchName(i))}</span><button class="btn" style="margin-left:auto" data-copy="${esc(branchName(i))}">Copy</button></div>
-      <p class="faint" style="margin-top:6px">Suggested branch name. Using it links the PR to this issue once GitHub sync is on.</p>`;
+      <p class="faint" style="margin-top:6px">${S.repo ? "Suggested branch name. A pull request from it links here by itself within a few minutes." : "Suggested branch name. Pull requests from it will link here once a repository is connected."}</p>`;
   };
 
   /* ---------- views ---------- */
@@ -374,9 +489,12 @@
       : '<p class="hint">No sessions logged yet.</p>'}</div>`;
     const partsNeeded = F.parts.filter((p) => p.have < p.need);
     const partsBlk = `<div class="blk"><h3>Parts we still need<button data-go="parts">Open</button></h3>${partsNeeded.map((p) => `<button class="li" data-go="parts"><span class="t">${esc(p.name)}</span><span class="r">${p.have} of ${p.need}${p.ordered ? " · " + p.ordered + " ordered" : ""}</span></button>`).join("") || '<p class="hint">Nothing missing.</p>'}</div>`;
+    const openPrs = F.issues.filter((i) => prState(i) === "open" || prState(i) === "draft");
     const gitBlk = `<div class="blk"><h3>GitHub</h3>${S.repo
-      ? `<p class="hint">Repo saved as <span class="mono">${esc(S.repo)}</span>. Live PR status is not wired up yet.</p>`
-      : `<p class="hint">No repo yet. Add one when you create it so branch names and links show up on issues.</p><button class="btn" data-act="github">Connect GitHub</button>`}</div>`;
+      ? (S.github.error
+        ? `<p class="hint err">${esc(S.github.error)}</p>`
+        : `${openPrs.map((i) => liIssue(i, `PR #${i.pr}${prState(i) === "draft" ? " · draft" : ""}`)).join("") || `<p class="hint">No open pull requests on <span class="mono">${esc(S.repo)}</span>.</p>`}`)
+      : `<p class="hint">No repo yet. Add one when you create it so pull requests link to issues.</p><button class="btn" data-act="github">Connect GitHub</button>`}</div>`;
 
     let left, right;
     if (role === "programmer") { left = [attention, myBlk]; right = [gitBlk, practiceBlk, healthBlk]; }
@@ -444,7 +562,7 @@
       ${needs.length ? `<div class="gh"><b>Needs an entry</b><span>${needs.length}</span></div>${needs.map((i) => `<div class="pi"><b>${esc(i.title)}</b><small>FTC-${i.id} · done</small><div style="margin-top:6px"><button class="btn" data-draft="${i.id}">Draft entry</button></div></div>`).join("")}` : ""}
       <div class="gh"><b>Entries</b><span>${entries.length}</span></div>
       ${entries.map((n) => `<button class="pi ${e && e.id === n.id ? "on" : ""}" data-nb="${n.id}"><b>${esc(n.title)}</b><small>${F.fmt(n.date)} · ${esc(F.person(n.author).name)} ${n.status === "draft" ? '<span class="tag draft">Draft</span>' : ""}</small></button>`).join("")}`;
-    const f = (k, label, rows = 3) => `<div class="fld"><label for="nb-${k}">${label}</label><textarea class="in" id="nb-${k}" rows="${rows}" data-nbf="${k}" data-nbid="${esc(e.id)}">${esc(e[k])}</textarea></div>`;
+    const f = (k, label, rows = 3) => `<div class="fld"><label for="nb-${k}">${label}</label><textarea class="in" id="nb-${k}" rows="${rows}" data-nbf="${k}" data-nbid="${esc(e.id)}" ${MENTION_ATTRS}>${esc(e[k])}</textarea></div>`;
     const editor = e ? `
       <div class="mono dim">${e.issue ? "FTC-" + e.issue : "No linked issue"} · ${F.fmt(e.date)} · ${esc(F.person(e.author).name)}</div>
       <h2>${esc(e.title)} ${e.status === "draft" ? '<span class="tag draft">Draft</span>' : ""}</h2>
@@ -492,7 +610,7 @@
           <div class="chart"><div class="dim">Auto success, out of 10</div><div class="big" style="margin:2px 0 8px">${last.auto}/10</div>${chart(p.map((x) => x.auto), { min: 0, max: 10, dates: p.map((x) => x.date) })}</div>
           <div class="chart"><div class="dim">Average cycle time, seconds</div><div class="big" style="margin:2px 0 8px">${last.cycle} s</div>${chart(p.map((x) => x.cycle), { min: Math.max(0, Math.floor(Math.min(...p.map((x) => x.cycle)) / 5) * 5 - 5), max: Math.ceil(Math.max(...p.map((x) => x.cycle)) / 5) * 5 + 5, dates: p.map((x) => x.date) })}</div>
         </div>` : ""}
-        <div class="blk"><h3>Log a session</h3>
+        <div class="blk" data-write><h3>Log a session</h3>
           <form class="form" data-prac>
             <input class="in" type="date" name="date" value="${F.today}" aria-label="Date">
             <select class="in" name="driver" aria-label="Driver">${F.people.map((x) => `<option value="${esc(x.id)}" ${x.id === F.me ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>
@@ -519,7 +637,7 @@
         <div class="chips" role="group" aria-label="Attendees">${F.people.map((p) => `<button class="chip ${m.who.includes(p.id) ? "on" : ""}" data-attend="${esc(m.id)}:${esc(p.id)}" aria-pressed="${m.who.includes(p.id)}">${esc(p.name)}</button>`).join("")}</div>
         <div class="sec"><h3>Agenda</h3>${m.agenda.map((a, k) => `<div class="li"><span class="t">${esc(a)}</span><button class="rm" data-agenda-rm="${esc(m.id)}:${k}" aria-label="Remove agenda item">Remove</button></div>`).join("")}
           <form class="formrow" data-agenda="${esc(m.id)}"><input class="in" name="t" placeholder="Add an agenda item" autocomplete="off" aria-label="Agenda item"><button class="btn">Add</button></form></div>
-        <div class="sec"><h3>Notes</h3><textarea class="in" rows="6" data-mtnotes="${esc(m.id)}" placeholder="What was decided?" aria-label="Notes">${esc(m.notes)}</textarea></div>
+        <div class="sec"><h3>Notes</h3><textarea class="in" rows="6" data-mtnotes="${esc(m.id)}" placeholder="What was decided? Type @ to mention someone" aria-label="Notes" ${MENTION_ATTRS}>${esc(m.notes)}</textarea></div>
         <div class="sec"><h3>Action items</h3>
           ${m.actions.map((a) => `<div class="li">${av(a.who)}<span class="t">${esc(a.text)}</span>${a.issue
             ? `<button class="chip mono" data-issue-go="${a.issue}">FTC-${a.issue}</button>`
@@ -528,6 +646,26 @@
             <select class="in" name="who" style="max-width:130px" aria-label="Owner">${F.people.map((p) => `<option value="${esc(p.id)}" ${p.id === F.me ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select><button class="btn">Add</button></form>
         </div>
         <div class="sec"><button class="btn ghost" data-rm="meetings:${esc(m.id)}">Delete meeting</button></div></div></div>`;
+  };
+
+  const followChips = () => `<div class="chips" role="group" aria-label="Subsystems you follow">${Object.entries(F.subs).map(([k, v]) => {
+    const on = S.prefs.follow.includes(k);
+    return `<button class="chip ${on ? "on" : ""}" data-follow="${k}" aria-pressed="${on}">${v}</button>`;
+  }).join("")}</div>`;
+
+  views.inbox = () => {
+    const team = S.iboxTab === "team";
+    const list = S.inbox.filter((x) => isTeam(x) === team);
+    const tab = (k, label, n) => `<button class="tab ${S.iboxTab === k ? "on" : ""}" data-ibox="${k}">${label}${n ? `<span class="cnt">${n}</span>` : ""}</button>`;
+    const items = list.map((x) => `<button class="li note ${x.read ? "" : "unread"}" data-note="${x.id}"><span class="dot${x.read ? "" : " new"}"></span><span class="t">${esc(x.text)}</span>${team && x.sub ? `<span class="chip">${F.subs[x.sub]}</span>` : ""}<span class="r">${ago(x.at)}</span></button>`).join("");
+    const empty = !team
+      ? `<div class="empty"><b>Nothing here yet</b>Assignments, comments, @mentions, blockers and due dates show up here.</div>`
+      : S.prefs.follow.length
+        ? `<div class="empty"><b>Quiet so far</b>New issues, comments and blockers on the subsystems you follow show up here.</div>`
+        : `<div class="empty"><b>Follow your subsystems</b>Pick the ones you work on above. New issues, comments and blockers on them show up here.</div>`;
+    return `<div class="ph"><h1>Inbox</h1><div class="tabs">${tab("you", "For you", unread())}${tab("team", "Teams", unreadTeam())}</div>
+        <div class="r">${list.some((x) => !x.read) ? `<button class="btn" data-inbox-all>Mark all as read</button>` : ""}<button class="btn ghost" data-act="notif-settings">Settings</button></div></div>
+      <div class="wrap">${team ? `<div class="follow"><span class="dim">Following</span>${followChips()}</div>` : ""}${items ? `<div class="blk">${items}</div>` : empty}</div>`;
   };
 
   views.pit = () => {
@@ -548,7 +686,7 @@
     const admin = isAdmin();
     const row = (title, desc, ctl) => `<div class="setrow"><div><b>${title}</b>${desc ? `<small>${desc}</small>` : ""}</div>${ctl}</div>`;
     const field = (key, val, label, type = "text", locked = false, extra = "") => `<input class="in" type="${type}" data-set="${key}" value="${esc(val)}" aria-label="${label}" ${locked ? "disabled" : ""} ${extra}>`;
-    const tgl = (k, label, off = false) => `<button class="tgl" role="switch" aria-checked="${!!S.prefs[k]}" aria-label="${label}" data-tgl="${k}" ${off ? "disabled" : ""}></button>`;
+    const tgl = (k, label, off = false, on = S.prefs[k]) => `<button class="tgl" role="switch" aria-checked="${!!on}" aria-label="${label}" data-tgl="${k}" ${off ? "disabled" : ""}></button>`;
     const segBtns = (attr, cur, opts) => `<div class="seg">${opts.map(([v, l]) => `<button class="${cur === v ? "on" : ""}" ${attr}="${v}" aria-pressed="${cur === v}">${l}</button>`).join("")}</div>`;
     const me = F.person(F.me);
     const q = qualifier();
@@ -558,6 +696,7 @@
       body = `<h2>Profile</h2><p class="dim">How you show up to the team. Signed in as <span class="mono">${esc(S.user.username)}</span> (${S.user.access}).</p><div class="box" style="margin-top:16px">
         ${row("Display name", "Shown on issues and comments.", field("dname", me.name, "Display name"))}
         ${row("Role", "Your title on the team.", field("drole", me.role, "Role"))}
+        ${row("GitHub username", "So review requests on GitHub reach your inbox.", field("dgh", me.gh || "", "GitHub username", "text", false, 'maxlength="39" autocapitalize="off" spellcheck="false" placeholder="octocat"'))}
         ${row("Default view", "What Home shows. Saved on this device.", `<select class="in" data-set="role" aria-label="Default view" style="width:220px">${[["captain", "Captain"], ["programmer", "Programmer"], ["builder", "Builder"]].map(([k, l]) => `<option value="${k}" ${S.role === k ? "selected" : ""}>${l}</option>`).join("")}</select>`)}
         ${row("Password", "", `<button class="btn" data-act="change-password">Change password</button>`)}
       </div>`;
@@ -582,12 +721,16 @@
         ${row("Density", "Compact fits more issues on a laptop screen.", segBtns("data-density", S.density, [["comfortable", "Comfortable"], ["compact", "Compact"]]))}
       </div>`;
     } else if (S.setTab === "notifications") {
-      body = `<h2>Notifications</h2><p class="dim">Your choices are saved on this device. Delivery (email or push) is not built yet.</p><div class="box" style="margin-top:16px">
+      body = `<h2>Notifications</h2><p class="dim">These arrive in your <button class="linkish" data-go="inbox">inbox</button>. Saved to your account, so they apply on every device.</p><div class="box" style="margin-top:16px">
         ${row("Due soon", "An issue assigned to you is due within 2 days.", tgl("due", "Due soon"))}
-        ${row("Blocked", "Something you depend on becomes blocked.", tgl("blocked", "Blocked"))}
-        ${row("Mentions", "Someone comments on your issue or mentions you.", tgl("mention", "Mentions"))}
-        ${row("Review requests", "A pull request needs your review.", tgl("pr", "Review requests"))}
+        ${row("Blocked", "An issue you're assigned to or commented on is marked Blocked.", tgl("blocked", "Blocked"))}
+        ${row("Assignments, comments and mentions", `Someone assigns you an issue, comments on one you're on, or writes @${esc(me.handle || S.user.username)}.`, tgl("mention", "Assignments, comments and mentions"))}
+        ${row("Review requests", me.gh ? "A pull request on GitHub asks for your review." : "A pull request on GitHub asks for your review. Add your GitHub username in Profile first.", tgl("pr", "Review requests"))}
         ${row("Weekly digest", "A Sunday summary of the week and what is next.", tgl("digest", "Weekly digest"))}
+      </div>
+      <h3 class="sh">Team inboxes</h3><div class="box" style="padding:14px 16px">
+        <p class="dim" style="margin-bottom:8px">Follow the subsystems you work on. Their new issues, comments, blockers and finished work go to Inbox, Teams, and so does anything that mentions the team, like @lift.</p>
+        ${followChips()}
       </div>`;
     } else if (S.setTab === "members") {
       body = `<h2>Members</h2><p class="dim">${F.people.length} ${F.people.length === 1 ? "person" : "people"}. Admins can add members, change access and reset passwords.</p>
@@ -599,9 +742,13 @@
     } else {
       body = `<h2>Integrations</h2><p class="dim">Connect the tools the team already uses.</p>${lockNote}
         <h3 class="sh">GitHub</h3><div class="box">
-        ${row("Repository", S.repo ? "Saved. Live PR sync is not built yet." : "No repo connected yet.", S.repo ? `<div class="avl"><span class="mono">${esc(S.repo)}</span>${admin ? `<button class="btn" data-gh-disc>Disconnect</button>` : ""}</div>` : (admin ? `<button class="btn pri" data-act="github">Connect GitHub</button>` : ""))}
+        ${row("Repository", S.repo ? "Pull requests link to issues by branch name, or FTC-123 in the title." : "No repo connected yet.", S.repo ? `<div class="avl"><span class="mono">${esc(S.repo)}</span>${admin ? `<button class="btn" data-gh-disc>Disconnect</button>` : ""}</div>` : (admin ? `<button class="btn pri" data-act="github">Connect GitHub</button>` : ""))}
+        ${S.repo ? row("Sync", S.github.error ? `<span class="err">${esc(S.github.error)}</span>` : S.github.at ? `Checked ${ago(S.github.at)}. Checks again every few minutes.` : "Not checked yet.", admin ? `<button class="btn" data-gh-sync>Check now</button>` : "") : ""}
+        ${admin ? row("Access token", "Only needed for a private repository. A fine-grained token with read-only access to pull requests is enough.", S.github.hasToken
+          ? `<div class="avl"><span class="dim">Saved</span><button class="btn ghost" data-gh-token-rm>Remove</button></div>`
+          : `<form class="avl" data-ghtoken><input class="in" type="password" name="token" placeholder="github_pat_…" autocomplete="off" aria-label="Access token" required style="width:160px"><button class="btn">Save</button></form>`) : ""}
         ${row("Branch prefix", "Suggested branch names start with this.", field("prefix", S.branchPrefix, "Branch prefix", "text", !admin, 'maxlength="20"'))}
-        ${row("Move issues with pull requests", "Opening a PR sets In review. Merging sets Done. Needs GitHub sync.", tgl("autopr", "Move issues with pull requests", true))}
+        ${row("Move issues with pull requests", "Opening a PR sets In review. Merging sets Done. You can still change the status by hand.", tgl("autopr", "Move issues with pull requests", !admin, S.autoPr))}
       </div>`;
     }
     return `<div class="ph"><h1>Settings</h1></div>
@@ -696,6 +843,7 @@
   /* ---------- render ---------- */
   function render() {
     if (!S.ready) return;
+    mentionClose();
     const keep = ["list", "panel"].map((c) => { const el = $("." + c); return el ? el.scrollTop : 0; });
     const route = S.route === "mine" ? "issues" : S.route;
     const view = views[route] || views.home;
@@ -703,10 +851,11 @@
     app.className = ("app " + (route === "pit" ? "pit " : "") + "role-" + S.role + (S.density === "compact" ? " dense" : "")).trim();
     $("#side").innerHTML = sideHtml();
     $("#page").innerHTML = view();
+    if (!canWrite() && route !== "settings") lockPage();
     const l = $(".list"), p = $(".panel");
     if (l) l.scrollTop = keep[0];
     if (p) p.scrollTop = keep[1];
-    document.title = `${F.team.short || "008"} Workspace`;
+    document.title = `${unread() ? `(${unread()}) ` : ""}${F.team.short || "008"} Workspace`;
   }
 
   /* ---------- actions ---------- */
@@ -719,6 +868,7 @@
     S.toastTimer = setTimeout(() => t.classList.remove("show"), 6500);
   }
   function setStatus(i, s) {
+    if (!canWrite()) return;
     i.status = s;
     persist("issues", i);
     if (s === "done" && !i.logged) toast(`FTC-${i.id} is done. Add it to the notebook?`, "Draft entry", () => draft(i.id));
@@ -743,6 +893,7 @@
   const footer = (ok, cancel = true) => `<p class="err" role="alert" style="padding:0 18px"></p><div class="ft">${cancel ? '<button type="button" class="btn" data-act="close-modal">Cancel</button>' : ""}<button class="btn pri">${ok}</button></div>`;
 
   function newIssueModal(seed = {}) {
+    if (!canWrite()) return toast("You have view-only access.");
     showModal(`<form data-new>
       <div class="hd">New issue</div>
       <div class="bd">
@@ -761,7 +912,7 @@
     showModal(`<form data-gh>
       <div class="hd">Connect GitHub</div>
       <div class="bd">
-        <p class="dim" style="margin-bottom:12px">Saves the repository name for the whole team. Live branch and pull request tracking is not built yet.</p>
+        <p class="dim" style="margin-bottom:12px">The server checks this repository every few minutes and links pull requests to issues. For a private repository, add an access token afterwards in Settings, Integrations.</p>
         <input class="in mono" name="repo" placeholder="owner/repo" pattern="[A-Za-z0-9_.\\-]+/[A-Za-z0-9_.\\-]+" required maxlength="100" autocomplete="off" aria-label="Repository">
       </div>${footer("Save")}
     </form>`);
@@ -778,8 +929,8 @@
   function palFilter(q) {
     q = q.trim().toLowerCase();
     const all = [
-      ...[["home", "Home"], ["issues", "Issues"], ["season", "Season"], ["notebook", "Notebook"], ["parts", "Parts"], ["practice", "Practice"], ["meetings", "Meetings"], ["pit", "Pit board"], ["settings", "Settings"]].map(([k, l]) => ({ label: "Go to " + l, hint: "Page", run: () => go(k) })),
-      { label: "New issue", hint: "C", run: () => newIssueModal() },
+      ...[["home", "Home"], ["inbox", "Inbox"], ["issues", "Issues"], ["season", "Season"], ["notebook", "Notebook"], ["parts", "Parts"], ["practice", "Practice"], ["meetings", "Meetings"], ["pit", "Pit board"], ["settings", "Settings"]].map(([k, l]) => ({ label: "Go to " + l, hint: "Page", run: () => go(k) })),
+      ...(canWrite() ? [{ label: "New issue", hint: "C", run: () => newIssueModal() }] : []),
       { label: "Toggle theme", hint: "Action", run: toggleTheme },
       { label: "Connect GitHub", hint: "Action", run: githubModal },
       { label: "Sign out", hint: "Action", run: logout },
@@ -794,6 +945,95 @@
       : '<li class="dim">No matches</li>';
   }
   function palRun(k) { const x = palItems[k]; if (!x) return; closePalette(); x.run(); }
+
+  /* ---------- @mention autocomplete ---------- */
+  const MENTION_AT = /(?:^|[^\w@])@([\w.-]{0,32})$/;
+  let mn = null; // the open menu: { el, at, items, idx }
+
+  function mentionables(query) {
+    const q = query.toLowerCase();
+    const score = (handle, label) => (handle.startsWith(q) ? 0 : label.toLowerCase().split(/\s+/).some((w) => w.startsWith(q)) ? 1 : label.toLowerCase().includes(q) ? 2 : -1);
+    return [
+      ...F.people.filter((p) => p.handle && p.id !== F.me).map((p) => ({ handle: p.handle, label: p.name, hint: p.role, person: p.id })),
+      ...Object.entries(F.subs).map(([k, v]) => ({ handle: k, label: v, hint: "Everyone following " + v })),
+    ].map((x) => ({ ...x, s: score(x.handle, x.label) })).filter((x) => x.s >= 0)
+      .sort((a, b) => a.s - b.s || (b.person ? 1 : 0) - (a.person ? 1 : 0)).slice(0, 7);
+  }
+
+  /** Where the caret is inside a field, in pixels, by laying the text out in a hidden copy of the field. */
+  function caretXY(el, pos) {
+    const cs = getComputedStyle(el), div = document.createElement("div");
+    for (const p of ["boxSizing", "width", "borderTopWidth", "borderLeftWidth", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+      "fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing", "wordSpacing", "textTransform", "textIndent", "tabSize"]) div.style[p] = cs[p];
+    Object.assign(div.style, { position: "absolute", visibility: "hidden", top: "0", left: "-9999px", overflow: "hidden",
+      whiteSpace: el.tagName === "TEXTAREA" ? "pre-wrap" : "pre", overflowWrap: "break-word" });
+    div.textContent = el.value.slice(0, pos);
+    const mark = document.createElement("span"); mark.textContent = "@";
+    div.appendChild(mark);
+    document.body.appendChild(div);
+    const line = parseFloat(cs.lineHeight) || (parseFloat(cs.fontSize) || 14) * 1.4;
+    const r = { top: mark.offsetTop + (parseFloat(cs.borderTopWidth) || 0) - el.scrollTop, left: mark.offsetLeft + (parseFloat(cs.borderLeftWidth) || 0) - el.scrollLeft, h: line };
+    div.remove();
+    return r;
+  }
+
+  function mentionUpdate(el) {
+    const pos = el.selectionStart;
+    const m = pos != null && el.selectionEnd === pos ? MENTION_AT.exec(el.value.slice(0, pos)) : null;
+    const items = m ? mentionables(m[1]) : [];
+    if (!items.length) return mentionClose();
+    mn = { el, at: pos - m[1].length - 1, items, idx: 0 };
+    mentionDraw();
+  }
+  function mentionDraw() {
+    const box = $("#mention");
+    box.innerHTML = mn.items.map((x, k) => `<li role="option" id="mn-${k}" aria-selected="${k === mn.idx}" class="${k === mn.idx ? "on" : ""}" data-mn="${k}">
+      ${x.person ? av(x.person) : `<span class="av team" aria-hidden="true">${ico("issues")}</span>`}<b>${esc(x.label)}</b><span class="mono dim">@${esc(x.handle)}</span>${x.hint ? `<span class="r">${esc(x.hint)}</span>` : ""}</li>`).join("");
+    box.hidden = false;
+    const r = mn.el.getBoundingClientRect(), c = caretXY(mn.el, mn.at);
+    const bw = box.offsetWidth || 300, bh = box.offsetHeight || 220;
+    let top = r.top + c.top + c.h + 4;
+    if (top + bh > innerHeight - 8) top = Math.max(8, r.top + c.top - bh - 4);
+    const left = Math.max(8, Math.min(r.left + c.left, innerWidth - bw - 8));
+    box.style.top = top + "px"; box.style.left = left + "px";
+    mn.el.setAttribute("aria-expanded", "true");
+    mn.el.setAttribute("aria-activedescendant", "mn-" + mn.idx);
+  }
+  function mentionClose() {
+    if (!mn) return;
+    mn.el.setAttribute("aria-expanded", "false");
+    mn.el.removeAttribute("aria-activedescendant");
+    mn = null;
+    const box = $("#mention"); box.hidden = true; box.innerHTML = "";
+  }
+  function mentionPick(k) {
+    const x = mn.items[k], el = mn.el, ins = "@" + x.handle + " ";
+    el.value = el.value.slice(0, mn.at) + ins + el.value.slice(el.selectionStart);
+    const at = mn.at + ins.length;
+    el.setSelectionRange(at, at);
+    mentionClose();
+    el.focus();
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  document.addEventListener("input", (e) => { if (e.target.matches && e.target.matches("[data-mention]")) mentionUpdate(e.target); });
+  document.addEventListener("click", (e) => { if (e.target.matches && e.target.matches("[data-mention]")) mentionUpdate(e.target); });
+  document.addEventListener("keyup", (e) => { if (/^(ArrowLeft|ArrowRight|Home|End)$/.test(e.key) && e.target.matches && e.target.matches("[data-mention]")) mentionUpdate(e.target); });
+  document.addEventListener("focusout", (e) => { if (mn && e.target === mn.el) mentionClose(); });
+  window.addEventListener("scroll", () => { if (mn) mentionDraw(); }, true);
+  window.addEventListener("resize", () => mentionClose());
+  // Capture phase, so the menu gets Enter, Tab, arrows and Escape before forms and shortcuts do.
+  window.addEventListener("keydown", (e) => {
+    if (!mn || e.target !== mn.el) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { mn.idx = (mn.idx + (e.key === "ArrowDown" ? 1 : -1) + mn.items.length) % mn.items.length; mentionDraw(); }
+    else if (e.key === "Enter" || e.key === "Tab") mentionPick(mn.idx);
+    else if (e.key === "Escape") mentionClose();
+    else return;
+    e.preventDefault(); e.stopPropagation();
+  }, true);
+  $("#mention").addEventListener("mousedown", (e) => {
+    const li = e.target.closest("[data-mn]");
+    if (li && mn) { e.preventDefault(); mentionPick(+li.dataset.mn); }
+  });
 
   function toggleTheme() {
     const t = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
@@ -826,6 +1066,19 @@
     if ((el = q("[data-issue-go]"))) { openIssue(el.dataset.issueGo); return; }
     if ((el = q("[data-issue]"))) { openIssue(el.dataset.issue); return; }
     if ((el = q("[data-draft]"))) { draft(el.dataset.draft); return; }
+    if ((el = q("[data-note]"))) {
+      const n = S.inbox.find((x) => x.id === +el.dataset.note); if (!n) return;
+      if (!n.read) markRead([n.id]);
+      if (n.link && /^https:\/\//.test(n.link)) { window.open(n.link, "_blank", "noopener"); render(); } else if (n.link) go(n.link); else render();
+      return;
+    }
+    if (q("[data-inbox-all]")) { markRead(S.inbox.filter((x) => !x.read && isTeam(x) === (S.iboxTab === "team")).map((x) => x.id)); render(); return; }
+    if ((el = q("[data-ibox]"))) { S.iboxTab = el.dataset.ibox; render(); return; }
+    if ((el = q("[data-follow]"))) {
+      const k = el.dataset.follow, f = S.prefs.follow;
+      S.prefs.follow = f.includes(k) ? f.filter((x) => x !== k) : [...f, k];
+      savePrefs(); render(); return;
+    }
     if ((el = q("[data-finalize]"))) {
       const n = F.notebook.find((x) => x.id === el.dataset.finalize); if (!n) return;
       n.status = "final"; persist("notebook", n);
@@ -871,12 +1124,26 @@
     }
     if ((el = q("[data-pi]"))) { palRun(+el.dataset.pi); return; }
     if ((el = q("[data-set-tab]"))) { S.setTab = el.dataset.setTab; render(); return; }
-    if ((el = q("[data-tgl]"))) { S.prefs[el.dataset.tgl] = !S.prefs[el.dataset.tgl]; saveUi(); render(); return; }
+    if ((el = q("[data-tgl]"))) {
+      const k = el.dataset.tgl;
+      if (k === "autopr") { S.autoPr = !S.autoPr; saveSettings(); } else { S.prefs[k] = !S.prefs[k]; savePrefs(); }
+      render(); return;
+    }
     if ((el = q("[data-accent]"))) { applyAccent(el.dataset.accent); render(); return; }
     if ((el = q("[data-theme-set]"))) { setThemePref(el.dataset.themeSet); render(); return; }
     if ((el = q("[data-density]"))) { S.density = el.dataset.density; saveUi(); render(); return; }
     if (q("[data-logo-clear]")) { F.team.logo = null; saveTeam(); render(); return; }
-    if (q("[data-gh-disc]")) { S.repo = null; saveSettings(); toast("Disconnected from GitHub."); render(); return; }
+    if (q("[data-gh-disc]")) { S.repo = null; S.github = { hasToken: S.github.hasToken }; saveSettings(); toast("Disconnected from GitHub."); render(); return; }
+    if ((el = q("[data-gh-sync]"))) {
+      el.disabled = true;
+      try { S.github = await write("POST", "/api/github/sync"); toast(S.github.error || "Checked GitHub."); refresh(); } catch (err) { writeFailed(err); }
+      render(); return;
+    }
+    if (q("[data-gh-token-rm]")) {
+      if (!window.confirm("Remove the GitHub access token? A private repository will stop syncing.")) return;
+      try { S.github = await write("DELETE", "/api/github/token"); toast("Token removed."); } catch (err) { writeFailed(err); }
+      render(); return;
+    }
     if ((el = q("[data-reset]"))) {
       const p = F.person(el.dataset.reset);
       if (!window.confirm(`Reset ${p.name}'s password? They will be signed out everywhere.`)) return;
@@ -892,6 +1159,7 @@
       else if (a === "logout") logout();
       else if (a === "menu") $("#app").classList.toggle("open");
       else if (a === "close-modal") closeModal();
+      else if (a === "notif-settings") { S.setTab = "notifications"; go("settings"); }
       else if (a === "close-issue") go("issues");
       else if (a === "new-entry") simpleModal("data-newentry", "New notebook entry", '<input class="in" name="title" placeholder="Title" required maxlength="200" autocomplete="off" aria-label="Title">', "Create entry");
       else if (a === "new-meeting") simpleModal("data-newmeeting", "New meeting", `<input class="in" name="title" placeholder="Title" required maxlength="200" autocomplete="off" aria-label="Title"><div class="fl"><div><label for="nm-d">Date</label><input class="in" id="nm-d" type="date" name="date" value="${F.today}" required></div></div>`, "Create meeting");
@@ -997,6 +1265,10 @@
       const v = t.value, k = t.dataset.set;
       if (k === "dname") { F.person(F.me).name = v || "?"; soon("me", saveMe); }
       else if (k === "drole") { F.person(F.me).role = v; soon("me", saveMe); }
+      else if (k === "dgh") {
+        const gh = v.trim().replace(/^@/, "");
+        if (!gh || /^[a-z\d](?:[a-z\d]|-(?=[a-z\d])){0,38}$/i.test(gh)) { F.person(F.me).gh = gh; soon("me", saveMe); }
+      }
       else if (k === "tname") { F.team.name = v; soon("team", saveTeam); }
       else if (k === "tnum") { F.team.num = v; soon("team", saveTeam); }
       else if (k === "tshort") { F.team.short = v; soon("team", saveTeam); }
@@ -1041,6 +1313,10 @@
         closeModal(); toast(`Created FTC-${i.id}.`, "Open", () => openIssue(i.id)); render();
       } else if (f.matches("[data-gh]")) {
         S.repo = d.repo.trim(); await saveSettings(); closeModal(); toast(`Saved ${S.repo}.`); render();
+      } else if (f.matches("[data-ghtoken]")) {
+        S.github = await write("PUT", "/api/github/token", { token: d.token });
+        toast(S.github.error ? `Token saved, but: ${S.github.error}` : "Token saved. GitHub is linked.");
+        refresh(); render();
       } else if (f.matches("[data-cmt]")) {
         const i = byId(f.dataset.cmt);
         if (d.t.trim()) { i.notes = [...(i.notes || []), { who: F.me, text: d.t.trim(), date: F.today }]; persist("issues", i); render(); }
@@ -1096,5 +1372,15 @@
   });
 
   window.addEventListener("hashchange", () => { parseHash(); render(); });
+
+  /* The date rolls over while the app stays open, for example a pit board left on overnight. */
+  function checkDay() {
+    const d = F.iso(new Date());
+    if (d !== F.today) { F.today = d; rerenderIfIdle(); }
+  }
+  setInterval(checkDay, 60_000);
+  document.addEventListener("visibilitychange", checkDay);
+  window.addEventListener("focus", checkDay);
+
   boot();
 })();
