@@ -258,7 +258,7 @@
   const hostOf = (el) => [...el.attributes].filter((a) => a.name.startsWith("data-")).map((a) => a.name + "=" + a.value).join(" ");
   /* Controls whose new state gets a small settle animation (.moved, styled in CSS). [selector, state, element to mark] */
   const WATCH = [
-    ["[data-tgl]", (el) => el.getAttribute("aria-checked")],
+    ["[data-tgl], [data-pal-opt]", (el) => el.getAttribute("aria-checked")],
     ["[data-accent], [data-attend], [data-follow], [data-note]", (el) => el.className + el.getAttribute("aria-pressed")],
     ["#side .nav", (el) => (el.querySelector(".n") || {}).textContent || "", (el) => el.querySelector(".n")],
   ];
@@ -422,6 +422,10 @@
     return `<svg class="pri-i" width="14" height="14" viewBox="0 0 14 14" role="img" aria-label="${F.pri[p]} priority">${bars}</svg>`;
   };
   const I = {
+    return: '<path d="M12.5 3.5v4A1.5 1.5 0 0 1 11 9H3.5M5.8 6.7 3.3 9l2.5 2.3"/>',
+    tab: '<path d="M2.5 8h9M8.5 4.8 11.7 8l-3.2 3.2M13.5 3.5v9"/>',
+    updown: '<path d="M5.5 12.5v-9M3.3 5.7l2.2-2.2 2.2 2.2M10.5 3.5v9M8.3 10.3l2.2 2.2 2.2-2.2"/>',
+    arrow: '<path d="M3 8h10M9.3 4.3 13 8l-3.7 3.7"/>',
     home: '<path d="M2 7.2 8 2.5l6 4.7V13a.5.5 0 0 1-.5.5H10V9H6v4.5H2.5A.5.5 0 0 1 2 13Z"/>',
     me: '<circle cx="8" cy="5.5" r="2.5"/><path d="M3 13.5c.4-2.6 2.5-4 5-4s4.6 1.4 5 4"/>',
     issues: '<circle cx="8" cy="8" r="5.5"/><path d="M5.5 8.2l1.8 1.8 3.2-3.6"/>',
@@ -828,7 +832,7 @@
   };
 
   views.settings = () => {
-    const tabs = [["profile", "Profile"], ["workspace", "Workspace"], ["appearance", "Appearance"], ["notifications", "Notifications"], ["members", "Members"], ["integrations", "Integrations"]];
+    const tabs = [["profile", "Profile"], ["workspace", "Workspace"], ["appearance", "Appearance"], ["palette", "Command center"], ["notifications", "Notifications"], ["members", "Members"], ["integrations", "Integrations"]];
     const admin = isAdmin();
     const row = (title, desc, ctl) => `<div class="setrow"><div><b>${title}</b>${desc ? `<small>${desc}</small>` : ""}</div>${ctl}</div>`;
     const field = (key, val, label, type = "text", locked = false, extra = "") => `<input class="in" type="${type}" data-set="${key}" value="${esc(val)}" aria-label="${label}" ${locked ? "disabled" : ""} ${extra}>`;
@@ -866,6 +870,14 @@
         ${row("Accent color", "Used for selection, buttons and links.", `<div class="swatches">${ACCENTS.map(([v, n, c]) => `<button class="sw" style="--c:${c}" title="${n}" aria-label="${n}" aria-pressed="${S.accent === v}" data-accent="${v}"></button>`).join("")}</div>`)}
         ${row("Density", "Compact fits more issues on a laptop screen.", segBtns("data-density", S.density, [["comfortable", "Comfortable"], ["compact", "Compact"]]))}
       </div>`;
+    } else if (S.setTab === "palette") {
+      const toggle = ([key, title, desc]) => row(title, desc, `<button class="tgl" role="switch" aria-checked="${palette.config[key]}" aria-label="${title}" data-pal-opt="${key}"></button>`);
+      const preset = currentPalettePreset();
+      body = `<h2>Command center</h2><p class="dim">The Ctrl K box. Saved on this device.</p><div class="box" style="margin-top:16px">
+        ${row("Style", preset === "custom" ? "Custom. Pick a preset to start over." : "Start from a preset, then adjust below.", segBtns("data-pal-preset", preset, [...PALETTE_PRESET_LABELS, ...(preset === "custom" ? [["custom", "Custom"]] : [])]))}
+        ${row("When the box is empty", "What to list before you type anything.", segBtns("data-pal-empty", palette.config.empty, PALETTE_EMPTY_LABELS))}
+        ${PALETTE_TOGGLES.map(toggle).join("")}
+      </div><div style="margin-top:14px"><button class="btn" data-act="palette">Try it</button></div>`;
     } else if (S.setTab === "notifications") {
       body = `<h2>Notifications</h2><p class="dim">These arrive in your <button class="linkish" data-go="inbox">inbox</button>. Saved to your account, so they apply on every device.</p><div class="box" style="margin-top:16px">
         ${row("Due soon", "An issue assigned to you is due within 2 days.", tgl("due", "Due soon"))}
@@ -1106,32 +1118,257 @@
   const simpleModal = (attr, title, fields, ok) => showModal(`<form ${attr}><div class="hd">${title}</div><div class="bd">${fields}</div>${footer(ok)}</form>`);
 
   /* command palette */
-  let palItems = [], palIdx = 0;
+  const PALETTE_CONFIG_KEY = "008-pal";
+  const PALETTE_RECENT_KEY = "008-pal-recent";
+  const PALETTE_RECENT_STORED = 5;
+  const PALETTE_RECENT_SHOWN = 3;
+  const PALETTE_PROMPT = "Type a command, or search";
+  const PALETTE_SUGGESTIONS_SHOWN = { suggest: 6, both: 4, menu: 1 };
+  const PALETTE_PRESETS = {
+    minimal: { ghost: true, empty: "suggest", chips: false, tokens: false, preview: false, recents: false, undo: true },
+    grammar: { ghost: true, empty: "menu", chips: true, tokens: true, preview: false, recents: false, undo: true },
+    context: { ghost: true, empty: "suggest", chips: false, tokens: false, preview: true, recents: true, undo: true },
+    mix: { ghost: true, empty: "both", chips: true, tokens: true, preview: true, recents: true, undo: true },
+  };
+  const PALETTE_DEFAULT_PRESET = "mix";
+  const PALETTE_PRESET_LABELS = [["minimal", "Minimal"], ["grammar", "Grammar"], ["context", "Context"], ["mix", "Mix"]];
+  const PALETTE_EMPTY_LABELS = [["suggest", "Suggestions"], ["both", "Both"], ["menu", "Commands"]];
+  const PALETTE_TOGGLES = [
+    ["ghost", "Ghost text", "A faded completion after your cursor. Tab or the right arrow accepts it."],
+    ["chips", "Grammar chips", "Shows the command as chips, with the next gap highlighted."],
+    ["tokens", "Highlight as you type", "Dims the verbs and turns finished values into chips inside the input."],
+    ["preview", "Preview bar", "Shows the exact change before you press Enter."],
+    ["recents", "Recent commands", "Lists the last few commands you ran when the box is empty."],
+    ["undo", "Undo after running", "Offers to take a command back for a few seconds."],
+  ];
+  const PALETTE_SLOT_NAMES = { pri: "priority", sub: "subsystem", accent: "color", role: "view" };
+
+  const readStorage = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch (e) { return fallback; } };
+  const writeStorage = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* storage unavailable */ } };
+
+  const palette = { engine: null, config: loadPaletteConfig(), result: null, rows: [], index: 0, chipsShown: new Set() };
+
+  function loadPaletteConfig() {
+    const base = PALETTE_PRESETS[PALETTE_DEFAULT_PRESET], stored = readStorage(PALETTE_CONFIG_KEY, {});
+    const config = { ...base };
+    for (const key of Object.keys(base)) if (typeof stored[key] === typeof base[key]) config[key] = stored[key];
+    if (!PALETTE_EMPTY_LABELS.some(([value]) => value === config.empty)) config.empty = base.empty;
+    return config;
+  }
+  function updatePaletteConfig(changes) {
+    palette.config = { ...palette.config, ...changes };
+    writeStorage(PALETTE_CONFIG_KEY, palette.config);
+  }
+  const paletteSettingKeys = Object.keys(PALETTE_PRESETS[PALETTE_DEFAULT_PRESET]);
+  const currentPalettePreset = () => Object.keys(PALETTE_PRESETS).find((name) => paletteSettingKeys.every((key) => PALETTE_PRESETS[name][key] === palette.config[key])) ?? "custom";
+
+  function paletteEnvironment() {
+    const clearIssueSelection = () => { S.view = S.role === "captain" ? "open" : "mine"; S.sub = ""; };
+    return {
+      F,
+      accents: ACCENTS,
+      ctx: {
+        route: S.route === "mine" ? "issues" : S.route, arg: S.arg, me: F.me,
+        theme: document.documentElement.getAttribute("data-theme"), themePref: themePref(),
+        accent: S.accent, density: S.density, role: S.role, canWrite: canWrite(), admin: isAdmin(),
+      },
+      act: {
+        go: (page) => {
+          if (page === "mine") { S.view = "mine"; S.sub = ""; return go("issues"); }
+          if (page === "issues") { if (S.view === "mine") S.view = "open"; S.sub = ""; }
+          go(page);
+        },
+        openIssue,
+        filterSub: (sub) => { S.sub = sub; S.view = "open"; go("issues"); render(); },
+        setTheme: (value) => vt(() => { setThemePref(value); render(); }),
+        toggleTheme: () => vt(toggleTheme),
+        setAccent: (value) => vt(() => { applyAccent(value); render(); }),
+        setDensity: (value) => { S.density = value; saveUi(); render(); },
+        setRole: (value) => { S.role = value; clearIssueSelection(); saveUi(); render(); },
+        setStatus: (id, status) => { setStatus(byId(id), status); render(); },
+        setWho: (id, who) => { const issue = byId(id); issue.who = who; persist("issues", issue); render(); },
+        setField: (id, field, value) => { const issue = byId(id); issue[field] = value || undefined; persist("issues", issue); render(); },
+        newIssue: (title) => newIssueModal({ title }),
+        draft,
+        connectGithub: githubModal,
+        signOut: logout,
+      },
+    };
+  }
+
   function openPalette() {
-    const ov = $("#ov-pal");
-    arrive(ov, ovRuns(ov));
-    const inp = $("#pal-in"); inp.value = ""; palFilter(""); inp.focus();
+    const overlay = $("#ov-pal"), input = $("#pal-in");
+    palette.engine = CMD.create(paletteEnvironment());
+    palette.chipsShown.clear();
+    arrive(overlay, ovRuns(overlay));
+    input.value = "";
+    paletteUpdate();
+    input.focus();
   }
   function closePalette() { const ov = $("#ov-pal"); leave(ov, ovRuns(ov)); }
-  function palFilter(q) {
-    q = q.trim().toLowerCase();
-    const all = [
-      ...[["home", "Home"], ["inbox", "Inbox"], ["issues", "Issues"], ["season", "Season"], ["notebook", "Notebook"], ["parts", "Parts"], ["practice", "Practice"], ["meetings", "Meetings"], ["pit", "Pit board"], ["settings", "Settings"]].map(([k, l]) => ({ label: "Go to " + l, hint: "Page", run: () => go(k) })),
-      ...(canWrite() ? [{ label: "New issue", hint: "C", run: () => newIssueModal() }] : []),
-      { label: "Toggle theme", hint: "Action", run: () => vt(toggleTheme) },
-      { label: "Connect GitHub", hint: "Action", run: githubModal },
-      { label: "Sign out", hint: "Action", run: logout },
-      ...F.issues.map((i) => ({ label: `FTC-${i.id}  ${i.title}`, hint: F.status[i.status], run: () => openIssue(i.id) })),
+
+  function recentRows() {
+    return readStorage(PALETTE_RECENT_KEY, []).map((text) => palette.engine.analyze(text).rows.find((row) => row.complete && row.text === text)).filter(Boolean);
+  }
+  function paletteRowsFor(result) {
+    if (!result.empty) return result.rows;
+    const { config } = palette, taken = new Set();
+    const section = (rows, name) => rows.filter((row) => !taken.has(row.text) && taken.add(row.text)).map((row) => ({ ...row, section: name }));
+    return [
+      ...section(result.rows.slice(0, PALETTE_SUGGESTIONS_SHOWN[config.empty]), "Suggested"),
+      ...(config.recents ? section(recentRows().slice(0, PALETTE_RECENT_SHOWN), "Recent") : []),
+      ...(config.empty === "suggest" ? [] : section(result.menu, "Commands")),
     ];
-    palItems = all.filter((x) => !q || x.label.toLowerCase().includes(q)).slice(0, 12);
-    palIdx = 0; palDraw();
   }
-  function palDraw() {
-    $("#pal-list").innerHTML = palItems.length
-      ? palItems.map((x, k) => `<li class="${k === palIdx ? "on" : ""}" data-pi="${k}"><b>${esc(x.label)}</b><span class="r">${esc(x.hint)}</span></li>`).join("")
-      : '<li class="dim">No matches</li>';
+
+  function paletteUpdate() {
+    palette.result = palette.engine.analyze($("#pal-in").value);
+    palette.rows = paletteRowsFor(palette.result);
+    palette.index = 0;
+    paletteDraw();
   }
-  function palRun(k) { const x = palItems[k]; if (!x) return; closePalette(); x.run(); }
+
+  function typedHtml(typed, segments, finished) {
+    if (!segments.length) return esc(typed);
+    let html = "", cursor = 0;
+    for (const [start, end, kind] of segments) {
+      const isChip = kind === "value" && (finished || end < typed.length);
+      html += esc(typed.slice(cursor, start)) + `<span class="pg-${kind}${isChip ? " is-chip" : ""}">${esc(typed.slice(start, end))}</span>`;
+      cursor = end;
+    }
+    return html + esc(typed.slice(cursor));
+  }
+
+  function chipValueHtml(slot, arg) {
+    if (slot === "issue") return `${statusIcon(byId(arg.id).status)}FTC-${arg.id}`;
+    if (slot === "person") return `${av(arg.id)}${esc(arg.label)}`;
+    if (slot === "status") return `${statusIcon(arg.id)}${esc(arg.label)}`;
+    if (slot === "accent") return `<span class="pal-sw" style="--c:${esc(arg.swatch)}"></span>${esc(arg.label)}`;
+    if (slot === "title") return `“${esc(arg.id)}”`;
+    return esc(arg.label ?? arg.id);
+  }
+  function chipsHtml(row) {
+    if (!row) return '<span class="gc-hint">Start typing, or pick a command below</span>';
+    const nextGap = row.parts.findIndex((part) => part.slot && !row.args[part.slot]);
+    const shownNow = new Set();
+    const html = row.parts.map((part, k) => {
+      if (part.words) return `<span class="gw">${esc(part.words[0])}</span>`;
+      const arg = row.args[part.slot];
+      if (arg) {
+        const key = part.slot + ":" + arg.id;
+        shownNow.add(key);
+        return `<span class="gc fill${palette.chipsShown.has(key) ? "" : " fresh"}">${chipValueHtml(part.slot, arg)}</span>`;
+      }
+      return `<span class="gc ${k === nextGap ? "now" : "next"}">${esc(PALETTE_SLOT_NAMES[part.slot] ?? part.slot)}</span>`;
+    }).join("");
+    palette.chipsShown = shownNow;
+    return html;
+  }
+
+  function rowRightText(row) {
+    if (row.why) return `<span class="r why ${row.tone || ""}">${esc(row.why)}</span>`;
+    return `<span class="r">${esc(row.hint || row.group)}</span>`;
+  }
+  const GAP_CHIP = '<span class="gc next mini" aria-hidden="true"></span>';
+  const templateHtml = (row) => row.parts.map((part) => (part.words ? esc(part.words[0]) : `<span class="gc next" aria-hidden="true">${esc(PALETTE_SLOT_NAMES[part.slot] ?? part.slot)}</span>`)).join(" ");
+  function rowLabelHtml(row) {
+    if (row.menu) return templateHtml(row);
+    return row.complete || !row.label.endsWith(" \u2026") ? esc(row.label) : esc(row.label.slice(0, -2)) + " " + GAP_CHIP;
+  }
+  function paletteRowHtml(row, k) {
+    const lead = row.swatch ? `<span class="pal-sw" style="--c:${esc(row.swatch)}"></span>` : "";
+    const detail = row.detail ? `<span class="d">${esc(row.detail)}</span>` : "";
+    return `<li role="option" id="pal-o-${k}" class="${k === palette.index ? "on" : ""}" aria-label="${esc(row.label)}" aria-selected="${k === palette.index}" data-pi="${k}">${lead}<b>${rowLabelHtml(row)}</b>${detail}${rowRightText(row)}</li>`;
+  }
+  function listHtml() {
+    if (!palette.rows.length) return '<li class="dim" role="presentation">Nothing matches. Try a verb: set, go to, assign, new issue</li>';
+    const showHeadings = new Set(palette.rows.map((row) => row.section)).size > 1;
+    let section;
+    return palette.rows.map((row, k) => {
+      const heading = showHeadings && row.section && row.section !== section ? `<li class="pal-head" role="presentation">${esc(row.section)}</li>` : "";
+      section = row.section;
+      return heading + paletteRowHtml(row, k);
+    }).join("");
+  }
+  const paletteFooterHtml = () => `<span><kbd>↵</kbd> run</span><span><kbd>Tab</kbd> complete</span><span><kbd>↑↓</kbd> move</span><button class="pal-gear" data-act="palette-settings">Customize</button>`;
+
+  function effectHtml(effect) {
+    if (effect.text) return `<b>${esc(effect.text)}</b>`;
+    return `<span class="fx-label">${esc(effect.label)}</span><span class="fx-from">${esc(effect.from)}</span><span class="fx-arrow">${ico("arrow")}</span><span class="gc fill">${esc(effect.to)}</span>`;
+  }
+  function previewHtml(row) {
+    if (!row) return '<span class="pv-idle">Nothing to run yet</span>';
+    if (!row.complete) return `<b>${esc(row.label)}</b><span class="d">Press <kbd>${ico("tab")}</kbd> to fill in the rest</span>`;
+    return `${row.effect ? effectHtml(row.effect) : `<b>${esc(row.label)}</b>`}${row.detail ? `<span class="d">${esc(row.detail)}</span>` : ""}`;
+  }
+
+  function paletteDraw() {
+    const { config, result } = palette;
+    const input = $("#pal-in"), typed = input.value, row = palette.rows[palette.index];
+    const ghost = config.ghost ? result.ghost : "";
+    const segments = config.tokens && row && !result.empty ? row.segments : [];
+    $("#pal").className = `dlg pal${config.tokens ? " has-tokens" : ""}${config.chips ? " has-chips" : ""}${config.preview ? " has-preview" : ""}`;
+    $("#pal-ghost").innerHTML = `<span class="pg-typed">${typedHtml(typed, segments, row && row.complete)}</span>`
+      + (ghost ? `<span class="pg-rest">${esc(ghost)}</span>` : "")
+      + (!typed && !ghost ? `<span class="pg-rest">${PALETTE_PROMPT}</span>` : "");
+    $("#pal-ghost").scrollLeft = input.scrollLeft;
+    $("#pal-accept").hidden = !ghost;
+    $("#pal-chips").innerHTML = config.chips ? chipsHtml(row) : "";
+    $("#pal-list").innerHTML = listHtml();
+    $("#pal-preview").innerHTML = config.preview ? previewHtml(row) : "";
+    $("#pal-foot").innerHTML = paletteFooterHtml();
+    input.setAttribute("aria-activedescendant", row ? "pal-o-" + palette.index : "");
+    const selected = $("#pal-o-" + palette.index);
+    if (selected && selected.scrollIntoView) selected.scrollIntoView({ block: "nearest" });
+  }
+
+  function paletteMove(step) {
+    if (!palette.rows.length) return;
+    palette.index = (palette.index + step + palette.rows.length) % palette.rows.length;
+    paletteDraw();
+  }
+  function paletteFill(text) {
+    const input = $("#pal-in");
+    input.value = text;
+    input.setSelectionRange(text.length, text.length);
+    paletteUpdate();
+    input.focus();
+  }
+  function paletteAccept() {
+    const { result, config } = palette, row = palette.rows[palette.index];
+    if (palette.index === 0 && config.ghost && result.ghost) return paletteFill(result.typed + result.ghost);
+    if (row) paletteFill(row.text);
+  }
+  function rememberCommand(row) {
+    if (row.command === "open" || row.command === "page") return;
+    const recent = [row.text, ...readStorage(PALETTE_RECENT_KEY, []).filter((text) => text !== row.text)];
+    writeStorage(PALETTE_RECENT_KEY, recent.slice(0, PALETTE_RECENT_STORED));
+  }
+  function paletteRun(row) {
+    closePalette();
+    rememberCommand(row);
+    const toastBefore = S.toastTimer;
+    const undo = row.run();
+    if (palette.config.undo && typeof undo === "function" && S.toastTimer === toastBefore) toast(row.label + ".", "Undo", undo);
+  }
+  function paletteChoose(k) {
+    const row = palette.rows[k];
+    if (!row) return;
+    if (row.complete) paletteRun(row);
+    else paletteFill(row.text);
+  }
+  function paletteKey(e) {
+    const input = $("#pal-in"), atEnd = input.selectionStart === input.value.length && input.selectionEnd === input.value.length;
+    const ghostShown = palette.config.ghost && palette.result.ghost;
+    if (e.key === "Escape") closePalette();
+    else if (e.key === "ArrowDown") paletteMove(1);
+    else if (e.key === "ArrowUp") paletteMove(-1);
+    else if (e.key === "Enter") paletteChoose(palette.index);
+    else if (e.key === "Tab" && !e.shiftKey) paletteAccept();
+    else if (e.key === "ArrowRight" && atEnd && ghostShown) paletteAccept();
+    else return;
+    e.preventDefault();
+  }
 
   /* ---------- @mention autocomplete ---------- */
   const MENTION_AT = /(?:^|[^\w@])@([\w.-]{0,32})$/;
@@ -1223,6 +1460,8 @@
     if (li && mn) { e.preventDefault(); mentionPick(+li.dataset.mn); }
   });
 
+  $("#pal").addEventListener("mousedown", (e) => { if (e.target.closest("button, li")) e.preventDefault(); });
+
   function toggleTheme() {
     const t = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", t);
@@ -1312,7 +1551,11 @@
       } catch (err) { done(); writeFailed(err); }
       return;
     }
-    if ((el = q("[data-pi]"))) { palRun(+el.dataset.pi); return; }
+    if ((el = q("[data-pal-preset]"))) { if (PALETTE_PRESETS[el.dataset.palPreset]) updatePaletteConfig(PALETTE_PRESETS[el.dataset.palPreset]); render(); return; }
+    if ((el = q("[data-pal-empty]"))) { updatePaletteConfig({ empty: el.dataset.palEmpty }); render(); return; }
+    if ((el = q("[data-pal-opt]"))) { updatePaletteConfig({ [el.dataset.palOpt]: !palette.config[el.dataset.palOpt] }); render(); return; }
+    if (q("#pal-accept")) { paletteAccept(); return; }
+    if ((el = q("[data-pi]"))) { paletteChoose(+el.dataset.pi); return; }
     if ((el = q("[data-set-tab]"))) { S.setTab = el.dataset.setTab; render(); return; }
     if ((el = q("[data-tgl]"))) {
       const k = el.dataset.tgl;
@@ -1352,6 +1595,7 @@
       else if (a === "menu") $("#app").classList.toggle("open");
       else if (a === "close-modal") closeModal();
       else if (a === "notif-settings") { S.setTab = "notifications"; go("settings"); }
+      else if (a === "palette-settings") { closePalette(); S.setTab = "palette"; go("settings"); }
       else if (a === "close-issue") closeIssue();
       else if (a === "new-entry") simpleModal("data-newentry", "New notebook entry", '<input class="in" name="title" placeholder="Title" required maxlength="200" autocomplete="off" aria-label="Title">', "Create entry");
       else if (a === "new-meeting") simpleModal("data-newmeeting", "New meeting", `<input class="in" name="title" placeholder="Title" required maxlength="200" autocomplete="off" aria-label="Title"><div class="fl"><div><label for="nm-d">Date</label><input class="in" id="nm-d" type="date" name="date" value="${F.today}" required></div></div>`, "Create meeting");
@@ -1369,13 +1613,7 @@
     if (!S.ready) return;
     if (e.key === "Enter" && e.target.matches && e.target.matches(".row")) { openIssue(e.target.dataset.issue); return; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); return; }
-    if ($("#ov-pal").classList.contains("show")) {
-      if (e.key === "Escape") closePalette();
-      else if (e.key === "ArrowDown") { e.preventDefault(); palIdx = Math.min(palIdx + 1, palItems.length - 1); palDraw(); }
-      else if (e.key === "ArrowUp") { e.preventDefault(); palIdx = Math.max(palIdx - 1, 0); palDraw(); }
-      else if (e.key === "Enter") { e.preventDefault(); palRun(palIdx); }
-      return;
-    }
+    if ($("#ov-pal").classList.contains("show")) return paletteKey(e);
     if (e.key === "Escape") {
       if ($("#ov-modal").classList.contains("show")) closeModal();
       else if (S.route === "pit") go("home");
@@ -1454,7 +1692,7 @@
     if (t.matches && t.matches("[data-addmember] [name=name]")) { const u = t.form.elements.username; if (!u.dataset.touched) u.value = t.value.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 32); return; }
     if (t.matches && t.matches("[data-addmember] [name=username]")) { t.dataset.touched = "1"; return; }
     if (!S.ready) return;
-    if (t.id === "pal-in") palFilter(t.value);
+    if (t.id === "pal-in") paletteUpdate();
     else if (t.matches("[data-set]") && t.dataset.set !== "role" && t.dataset.set !== "qual") {
       const v = t.value, k = t.dataset.set;
       if (k === "dname") { F.person(F.me).name = v || "?"; soon("me", saveMe); }

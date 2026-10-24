@@ -22,15 +22,23 @@
   </div>
 </div>
 
-<div class="ov" id="ov-pal"><div class="dlg pal" role="dialog" aria-label="Search">
-  <input id="pal-in" placeholder="Search issues, pages, actions" autocomplete="off">
-  <ul id="pal-list"></ul>
+<div class="ov" id="ov-pal"><div class="dlg pal" id="pal" role="dialog" aria-label="Command center">
+  <div class="pal-field">
+    <div class="pal-ghost" id="pal-ghost" aria-hidden="true"></div>
+    <input id="pal-in" role="combobox" aria-expanded="true" aria-controls="pal-list" aria-autocomplete="both" aria-label="Command" autocomplete="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true">
+    <button class="pal-accept" id="pal-accept" tabindex="-1" aria-label="Accept suggestion" hidden><kbd><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8h9M8.5 4.8 11.7 8l-3.2 3.2M13.5 3.5v9"/></svg></kbd></button>
+  </div>
+  <div class="pal-chips" id="pal-chips" aria-hidden="true"></div>
+  <ul id="pal-list" role="listbox" aria-label="Commands"></ul>
+  <div class="pal-preview" id="pal-preview" aria-live="polite"></div>
+  <div class="pal-foot" id="pal-foot"></div>
 </div></div>
 <div class="ov" id="ov-modal"><div class="dlg" id="modal" role="dialog"></div></div>
 <div id="toast" role="status"></div>
 <ul id="mention" role="listbox" aria-label="Mention someone" hidden></ul>
 
 <script src="data.js"></script>
+<script src="commands.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -388,3 +388,72 @@ test("@mention autocomplete: type, pick with the keyboard, and the comment reach
   assert.deepEqual(t.errors, []);
   await t.close();
 });
+
+test("command center: type a command, complete it with Tab, run it with Enter, and undo it", { skip }, async () => {
+  const t = await open({ demo: true });
+  await t.signIn("joseph", "innovators");
+  await until(() => t.q(".ws b"), "app shell");
+  t.w.location.hash = "#/issues/45"; await tick();
+
+  const press = (key, target = t.q("#pal-in")) => target.dispatchEvent(new t.w.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+  const ghost = () => t.q("#pal-ghost .pg-rest")?.textContent ?? "";
+  t.w.document.dispatchEvent(new t.w.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
+  await until(() => t.q("#ov-pal").classList.contains("show"), "palette open");
+  assert.match(ghost(), /^set FTC-45 status to /, "empty input ghosts the next step for the open issue");
+
+  t.type(t.q("#pal-in"), "set theme to li");
+  assert.equal(ghost(), "ght");
+  press("Tab");
+  assert.equal(t.q("#pal-in").value, "set theme to light");
+  press("Enter");
+  await until(() => t.w.document.documentElement.getAttribute("data-theme") === "light", "theme applied");
+  const undo = await until(() => t.q("#toast button"), "undo toast");
+  assert.match(t.q("#toast").textContent, /Undo/);
+  undo.click();
+
+  t.w.document.dispatchEvent(new t.w.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
+  await until(() => t.q("#ov-pal").classList.contains("show"), "palette reopened");
+  t.type(t.q("#pal-in"), "move 45 to done");
+  press("Enter");
+  await until(() => t.app.store.get("issues", 45).status === "done", "status changed through the palette");
+
+  t.w.document.dispatchEvent(new t.w.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
+  await until(() => t.q("#ov-pal").classList.contains("show"), "palette reopened again");
+  t.type(t.q("#pal-in"), "assign ");
+  press("Enter");
+  assert.match(t.q("#pal-in").value, /^assign FTC-\d+ to $/, "an unfinished command is filled in rather than run");
+  assert.deepEqual(t.errors, []);
+});
+
+test("command center settings: presets and switches change what the palette shows", { skip }, async () => {
+  const t = await open({ demo: true });
+  await t.signIn("joseph", "innovators");
+  await until(() => t.q(".ws b"), "app shell");
+  t.w.location.hash = "#/settings"; await tick();
+  t.q('[data-set-tab="palette"]').click();
+  await until(() => t.q("[data-pal-preset]"), "command center settings");
+
+  const openPalette = async () => {
+    t.w.document.dispatchEvent(new t.w.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
+    await until(() => t.q("#ov-pal").classList.contains("show"), "palette open");
+  };
+  await openPalette();
+  t.type(t.q("#pal-in"), "assign FTC-45 to ");
+  assert.ok(t.q("#pal-chips .gc.fill"), "the default style shows grammar chips");
+  assert.ok(t.q("#pal-preview b, #pal-preview .fx-label"), "and the preview bar");
+  t.q("#ov-pal").click();
+  await until(() => !t.q("#ov-pal").classList.contains("show"), "palette closed");
+
+  t.q('[data-pal-preset="minimal"]').click();
+  await until(() => t.q('[data-pal-preset="minimal"].on'), "minimal selected");
+  t.q('[data-pal-opt="ghost"]').click();
+  await until(() => t.q('[data-pal-opt="ghost"]').getAttribute("aria-checked") === "false", "ghost switched off");
+  assert.ok(t.q('[data-pal-preset="custom"]'), "a hand-tuned mix is labelled custom");
+
+  await openPalette();
+  t.type(t.q("#pal-in"), "set theme to li");
+  assert.equal(t.q("#pal-ghost .pg-rest"), null, "no ghost text when it is switched off");
+  assert.equal(t.q("#pal-chips").innerHTML, "", "no chips in the minimal style");
+  assert.equal(t.w.localStorage.getItem("008-pal") !== null, true, "the choice is saved on this device");
+  assert.deepEqual(t.errors, []);
+});
