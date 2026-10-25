@@ -746,7 +746,7 @@
           <thead><tr><th>Part</th><th>Subsystem</th><th class="num">Have</th><th class="num">Ordered</th><th class="num">Need</th><th>Status</th><th class="num">Unit</th><th>Vendor</th><th></th></tr></thead>
           <tbody>${F.parts.map((p) => {
             const st = p.have >= p.need ? ["ok", "In stock"] : p.have + p.ordered >= p.need ? ["warn", "Ordered"] : ["bad", "Needed"];
-            return `<tr><td>${esc(p.name)}</td><td class="dim">${F.subs[p.sub]}</td><td class="num">${num(p, "have")}</td><td class="num">${num(p, "ordered")}</td><td class="num">${num(p, "need")}</td><td>${dot(st[0])} ${st[1]}</td><td class="num">$${p.price.toFixed(2)}</td><td class="dim">${esc(p.vendor)}</td><td><button class="rm" data-rm="parts:${esc(p.id)}" aria-label="Remove ${esc(p.name)}">Remove</button></td></tr>`;
+            return `<tr data-part="${esc(p.id)}"><td>${esc(p.name)}</td><td class="dim">${F.subs[p.sub]}</td><td class="num">${num(p, "have")}</td><td class="num">${num(p, "ordered")}</td><td class="num">${num(p, "need")}</td><td>${dot(st[0])} ${st[1]}</td><td class="num">$${p.price.toFixed(2)}</td><td class="dim">${esc(p.vendor)}</td><td><button class="rm" data-rm="parts:${esc(p.id)}" aria-label="Remove ${esc(p.name)}">Remove</button></td></tr>`;
           }).join("")}</tbody>
         </table>` : `<div class="empty"><b>No parts yet</b>Add what you own and what you still need.</div>`}
       </div>`;
@@ -773,7 +773,7 @@
           </form></div>
         ${p.length ? `<table>
           <thead><tr><th>Date</th><th>Driver</th><th class="num">Auto</th><th class="num">Cycle</th><th>Notes</th><th></th></tr></thead>
-          <tbody>${p.slice().reverse().map((x) => `<tr><td>${F.fmt(x.date)}</td><td>${esc(F.person(x.driver).name)}</td><td class="num">${x.auto}/10</td><td class="num">${x.cycle} s</td><td class="dim">${esc(x.note)}</td><td><button class="rm" data-rm="practice:${esc(x.id)}" aria-label="Remove session">Remove</button></td></tr>`).join("")}</tbody>
+          <tbody>${p.slice().reverse().map((x) => `<tr data-session="${esc(x.id)}"><td>${F.fmt(x.date)}</td><td>${esc(F.person(x.driver).name)}</td><td class="num">${x.auto}/10</td><td class="num">${x.cycle} s</td><td class="dim">${esc(x.note)}</td><td><button class="rm" data-rm="practice:${esc(x.id)}" aria-label="Remove session">Remove</button></td></tr>`).join("")}</tbody>
         </table>` : `<div class="empty"><b>No sessions yet</b>Log your first practice run above.</div>`}
       </div>`;
   };
@@ -1558,6 +1558,130 @@
       <div class="pw">${esc(password)}</div><button class="btn" data-copy="${esc(password)}" data-copy-label="Password copied.">Copy password</button></div>
       <div class="ft"><button class="btn pri" data-act="close-modal">Done</button></div></div>`);
 
+
+  /* ---------- shared actions ---------- */
+  const assign = (i, who) => { i.who = [who, ...i.who.slice(1).filter((x) => x !== who)]; persist("issues", i); };
+  async function copyText(value, message) {
+    try { await navigator.clipboard.writeText(value); } catch (err) { /* ignore */ }
+    toast(message);
+  }
+  const REMOVE_LABEL = { issues: "this issue", notebook: "this notebook entry", meetings: "this meeting", parts: "this part", practice: "this session", milestones: "this milestone", phases: "this phase" };
+  /** Asks first. btn, if given, shows it is working. */
+  async function removeWithConfirm(coll, id, btn) {
+    if (!window.confirm(`Delete ${REMOVE_LABEL[coll]}? This can't be undone.`)) return;
+    const done = btn ? busy(btn) : () => {};
+    try {
+      await remove(coll, id);
+      if (coll === "issues") go("issues"); else render();
+    } catch (err) { done(); writeFailed(err); }
+  }
+  function finalizeEntry(n) {
+    if (!n) return;
+    n.status = "final"; persist("notebook", n);
+    const i = byId(n.issue); if (i) { i.logged = true; persist("issues", i); }
+    toast("Saved to the notebook."); render();
+  }
+  function openNote(n) {
+    if (!n) return;
+    if (!n.read) markRead([n.id]);
+    if (n.link && /^https:\/\//.test(n.link)) { window.open(n.link, "_blank", "noopener"); render(); } else if (n.link) go(n.link); else render();
+  }
+
+  /* ---------- context menus ---------- */
+  const withIssue = (id, fn) => () => { const i = byId(id); if (i) fn(i); };
+  const choices = (entries, current, pick, icon) => entries.map(([k, label]) => ({ label, check: k === current, icon: icon && icon(k), run: pick(k) }));
+
+  function issueMenu(id) {
+    const i = byId(id);
+    if (!i) return null;
+    const w = canWrite();
+    return [
+      { label: "Open", icon: ico("arrow"), run: () => openIssue(id) },
+      w && "-",
+      w && { label: "Status", items: choices(Object.entries(F.status), i.status, (k) => withIssue(id, (x) => { setStatus(x, k); render(); }), statusIcon) },
+      w && { label: "Priority", items: choices(Object.entries(F.pri), i.pri, (k) => withIssue(id, (x) => { x.pri = k; persist("issues", x); render(); }), priIcon) },
+      w && { label: "Assign to", items: choices(F.people.map((p) => [p.id, p.name]), i.who[0], (k) => withIssue(id, (x) => { assign(x, k); render(); }), av) },
+      "-",
+      { label: "Copy ID", hint: "FTC-" + id, run: () => copyText("FTC-" + id, `Copied FTC-${id}.`) },
+      { label: "Copy branch name", run: () => copyText(branchName(i), "Branch name copied.") },
+      w && i.status === "done" && !i.logged && { label: "Draft notebook entry", run: () => draft(id) },
+      isAdmin() && "-",
+      isAdmin() && { label: "Delete issue", danger: true, run: () => removeWithConfirm("issues", id) },
+    ];
+  }
+  function notebookMenu(id) {
+    const n = F.notebook.find((x) => x.id === id);
+    if (!n) return null;
+    const w = canWrite();
+    return [
+      { label: "Open", icon: ico("arrow"), run: () => { S.nbSel = id; render(); } },
+      w && n.status === "draft" && { label: "Mark as logged", run: () => finalizeEntry(F.notebook.find((x) => x.id === id)) },
+      n.issue && { label: "Open FTC-" + n.issue, run: () => openIssue(n.issue) },
+      w && "-",
+      w && { label: "Delete entry", danger: true, run: () => removeWithConfirm("notebook", id) },
+    ];
+  }
+  function meetingMenu(id) {
+    if (!F.meetings.some((x) => x.id === id)) return null;
+    return [
+      { label: "Open", icon: ico("arrow"), run: () => { S.mtSel = id; render(); } },
+      canWrite() && "-",
+      canWrite() && { label: "Delete meeting", danger: true, run: () => removeWithConfirm("meetings", id) },
+    ];
+  }
+  function partMenu(id) {
+    const p = F.parts.find((x) => x.id === id);
+    if (!p) return null;
+    const w = canWrite();
+    const edit = (fn) => () => { const x = F.parts.find((y) => y.id === id); if (x) { fn(x); persist("parts", x); render(); } };
+    return [
+      w && p.have < p.need && p.have + p.ordered < p.need && { label: "Mark as ordered", run: edit((x) => { x.ordered = x.need - x.have; }) },
+      w && p.have < p.need && { label: "Mark as in stock", run: edit((x) => { x.have = x.need; x.ordered = 0; }) },
+      { label: "Copy part name", run: () => copyText(p.name, "Part name copied.") },
+      w && "-",
+      w && { label: "Remove part", danger: true, run: () => removeWithConfirm("parts", id) },
+    ];
+  }
+  function sessionMenu(id) {
+    if (!canWrite() || !F.practice.some((x) => String(x.id) === id)) return null;
+    return [{ label: "Remove session", danger: true, run: () => removeWithConfirm("practice", id) }];
+  }
+  function noteMenu(id) {
+    const n = S.inbox.find((x) => x.id === id);
+    if (!n) return null;
+    return [
+      { label: "Open", icon: ico("arrow"), run: () => openNote(S.inbox.find((x) => x.id === id)) },
+      !n.read && { label: "Mark as read", run: () => { markRead([id]); render(); } },
+    ];
+  }
+  function subsystemMenu(k) {
+    const following = S.prefs.follow.includes(k);
+    return [
+      { label: "Show issues", icon: ico("arrow"), run: () => { S.sub = k; S.view = "open"; go("issues"); render(); } },
+      { label: following ? "Unfollow in Inbox" : "Follow in Inbox", run: () => { S.prefs.follow = following ? S.prefs.follow.filter((x) => x !== k) : [...S.prefs.follow, k]; savePrefs(); render(); } },
+    ];
+  }
+
+  /** The menu for whatever was right-clicked, or null to leave the browser's own menu (text fields, links, selected text). */
+  function contextItems(t) {
+    if (!S.ready || S.route === "pit" || document.querySelector(".ov.show")) return null;
+    if (t.closest("input, textarea, select, a[href], [contenteditable]")) return null;
+    const sel = getSelection();
+    let el;
+    if ((el = t.closest("[data-issue], [data-issue-go]"))) {
+      if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) return null;
+      return issueMenu(+(el.dataset.issue ?? el.dataset.issueGo));
+    }
+    if ((el = t.closest("[data-nb]"))) return notebookMenu(el.dataset.nb);
+    if ((el = t.closest("[data-mt]"))) return meetingMenu(el.dataset.mt);
+    if ((el = t.closest("[data-part]"))) return partMenu(el.dataset.part);
+    if ((el = t.closest("[data-session]"))) return sessionMenu(el.dataset.session);
+    if ((el = t.closest("[data-note]"))) return noteMenu(+el.dataset.note);
+    if ((el = t.closest("#side [data-sub]"))) return subsystemMenu(el.dataset.sub);
+    return null;
+  }
+  window.ContextMenu.attach(contextItems);
+
   /* ---------- events ---------- */
   document.addEventListener("click", async (e) => {
     const t = e.target;
@@ -1573,12 +1697,7 @@
     if ((el = q("[data-issue-go]"))) { openIssue(el.dataset.issueGo); return; }
     if ((el = q("[data-issue]"))) { openIssue(el.dataset.issue); return; }
     if ((el = q("[data-draft]"))) { const done = busy(el); draft(el.dataset.draft).finally(done); return; }
-    if ((el = q("[data-note]"))) {
-      const n = S.inbox.find((x) => x.id === +el.dataset.note); if (!n) return;
-      if (!n.read) markRead([n.id]);
-      if (n.link && /^https:\/\//.test(n.link)) { window.open(n.link, "_blank", "noopener"); render(); } else if (n.link) go(n.link); else render();
-      return;
-    }
+    if ((el = q("[data-note]"))) { openNote(S.inbox.find((x) => x.id === +el.dataset.note)); return; }
     if (q("[data-inbox-all]")) { markRead(S.inbox.filter((x) => !x.read && isTeam(x) === (S.iboxTab === "team")).map((x) => x.id)); render(); return; }
     if ((el = q("[data-ibox]"))) { S.iboxTab = el.dataset.ibox; render(); return; }
     if ((el = q("[data-follow]"))) {
@@ -1586,26 +1705,11 @@
       S.prefs.follow = f.includes(k) ? f.filter((x) => x !== k) : [...f, k];
       savePrefs(); render(); return;
     }
-    if ((el = q("[data-finalize]"))) {
-      const n = F.notebook.find((x) => x.id === el.dataset.finalize); if (!n) return;
-      n.status = "final"; persist("notebook", n);
-      const i = byId(n.issue); if (i) { i.logged = true; persist("issues", i); }
-      toast("Saved to the notebook."); render(); return;
-    }
+    if ((el = q("[data-finalize]"))) { finalizeEntry(F.notebook.find((x) => x.id === el.dataset.finalize)); return; }
     if ((el = q("[data-nb]"))) { S.nbSel = el.dataset.nb; render(); return; }
     if ((el = q("[data-mt]"))) { S.mtSel = el.dataset.mt; render(); return; }
-    if ((el = q("[data-copy]"))) { const v = el.dataset.copy; try { await navigator.clipboard.writeText(v); } catch (err) { /* ignore */ } toast(el.dataset.copyLabel || "Branch name copied."); return; }
-    if ((el = q("[data-rm]"))) {
-      const [coll, id] = el.dataset.rm.split(":");
-      const label = { issues: "this issue", notebook: "this notebook entry", meetings: "this meeting", parts: "this part", practice: "this session", milestones: "this milestone", phases: "this phase" }[coll];
-      if (!window.confirm(`Delete ${label}? This can't be undone.`)) return;
-      const done = busy(el);
-      try {
-        await remove(coll, id);
-        if (coll === "issues") go("issues"); else render();
-      } catch (err) { done(); writeFailed(err); }
-      return;
-    }
+    if ((el = q("[data-copy]"))) { copyText(el.dataset.copy, el.dataset.copyLabel || "Branch name copied."); return; }
+    if ((el = q("[data-rm]"))) { const [coll, id] = el.dataset.rm.split(":"); removeWithConfirm(coll, id, el); return; }
     if ((el = q("[data-attend]"))) {
       const [mid, pid] = el.dataset.attend.split(":");
       const m = F.meetings.find((x) => x.id === mid); if (!m) return;
@@ -1731,7 +1835,7 @@
     if (t.matches("[data-field]")) {
       const i = byId(t.dataset.id), f = t.dataset.field;
       if (f === "status") setStatus(i, t.value);
-      else if (f === "who") { i.who = [t.value, ...i.who.slice(1).filter((x) => x !== t.value)]; persist("issues", i); }
+      else if (f === "who") assign(i, t.value);
       else if (f === "due") { i.due = t.value || undefined; persist("issues", i); }
       else { i[f] = t.value; persist("issues", i); }
       render();

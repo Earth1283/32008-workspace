@@ -427,6 +427,23 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 #mention li .r { margin-left: auto; padding-left: 12px; color: var(--faint); font-size: 12px; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
 #mention .av.team { display: inline-grid; place-items: center; background: var(--side); color: var(--dim); border-radius: 5px; }
 .mention { color: var(--brand); font-weight: 500; }
+#ctx { position: fixed; z-index: 80; min-width: 200px; max-width: min(320px, calc(100vw - 16px)); padding: 4px; background: var(--raise); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.28); outline: none; user-select: none; -webkit-user-select: none; }
+#ctx[hidden] { display: none; }
+.ctx-item { position: relative; display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: default; white-space: nowrap; outline: none; }
+.ctx-item:focus, .ctx-item.open { background: var(--tint); }
+.ctx-item[aria-disabled="true"] { color: var(--faint); }
+.ctx-item.danger { color: var(--blocked); }
+.ctx-ic { display: inline-flex; width: 16px; justify-content: center; flex: none; color: var(--dim); }
+.ctx-item.danger .ctx-ic { color: inherit; }
+.ctx-t { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.ctx-hint { color: var(--faint); font-size: 12px; padding-left: 16px; }
+.ctx-check, .ctx-caret { display: inline-flex; width: 14px; justify-content: center; flex: none; color: var(--dim); }
+.ctx-sep { height: 1px; margin: 4px 6px; background: var(--line); }
+.ctx-head { padding: 6px 8px 2px; color: var(--faint); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+.ctx-sub { display: none; position: absolute; top: -5px; left: calc(100% + 2px); min-width: 180px; padding: 4px; background: var(--raise); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.28); }
+.ctx-sub.flip { left: auto; right: calc(100% + 2px); }
+.ctx-item.open > .ctx-sub { display: block; }
+.row, .card, .pi, .li.note, #side [data-sub] { -webkit-touch-callout: none; }
 .follow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; }
 .follow .chips { margin-top: 0; }
 .tab .cnt { color: var(--brand); font-weight: 600; margin-left: 6px; }

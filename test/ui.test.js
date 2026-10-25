@@ -506,3 +506,66 @@ test("command center: a question waits for a pause, answers below the local rows
   assert.deepEqual(t.errors, []);
   await t.close();
 });
+
+test("context menus: right-click an issue to change it, with the keyboard too, and text fields keep the browser's menu", { skip }, async () => {
+  const t = await open({ demo: true });
+  await t.signIn("joseph", "innovators");
+  await until(() => t.q(".ws b"), "app shell");
+  t.w.location.hash = "#/issues"; await tick();
+
+  const menu = () => t.q("#ctx");
+  const shown = () => !menu().hidden;
+  const rightClick = (el) => {
+    const ev = new t.w.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 40, clientY: 40 });
+    el.dispatchEvent(ev);
+    return ev;
+  };
+  const key = (k) => t.w.dispatchEvent(new t.w.KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+  const item = (label) => [...t.d.querySelectorAll("#ctx .ctx-item")].find((x) => x.querySelector(".ctx-t").textContent === label);
+
+  await until(() => t.q('.row[data-issue="45"]'), "issue row");
+  const row = () => t.q('.row[data-issue="45"]');
+  assert.equal(rightClick(row()).defaultPrevented, true, "the browser's menu is replaced");
+  assert.ok(shown());
+  assert.deepEqual([...t.d.querySelectorAll("#ctx > .ctx-item > .ctx-t")].map((x) => x.textContent).slice(0, 4), ["Open", "Status", "Priority", "Assign to"]);
+
+  item("Status").click();
+  assert.ok(item("Status").classList.contains("open"), "clicking a submenu opens it");
+  const was = t.app.store.get("issues", 45).status;
+  const pick = [...t.d.querySelectorAll("#ctx .ctx-sub .ctx-item")].find((x) => x.getAttribute("aria-checked") === "false" && /Blocked|In review/.test(x.textContent));
+  pick.click();
+  assert.ok(!shown(), "choosing closes the menu");
+  await until(() => t.app.store.get("issues", 45).status !== was, "status saved");
+
+  rightClick(row());
+  assert.ok(shown());
+  key("Escape");
+  assert.ok(!shown(), "Escape closes it");
+
+  rightClick(row());
+  key("ArrowDown"); key("ArrowDown"); key("ArrowDown"); key("ArrowRight");
+  assert.ok(item("Priority").classList.contains("open"), "right arrow opens the submenu");
+  key("ArrowDown"); key("Enter");
+  assert.ok(!shown());
+  await until(() => t.app.store.get("issues", 45).pri === "med", "priority saved");
+
+  rightClick(row());
+  key("o");
+  assert.equal(t.d.activeElement.querySelector(".ctx-t").textContent, "Open", "typing a letter jumps to the item");
+  key("Enter");
+  await until(() => /#\/issues\/45/.test(t.w.location.hash), "opened from the menu");
+
+  const field = await until(() => t.q("[data-desc]"), "description field");
+  assert.equal(rightClick(field).defaultPrevented, false, "text fields keep the browser's menu");
+  assert.ok(!shown());
+
+  t.w.location.hash = "#/parts"; await tick();
+  const part = await until(() => t.q("tr[data-part]"), "part row");
+  rightClick(part);
+  assert.ok(item("Copy part name") && item("Remove part"));
+  const id = part.dataset.part;
+  item("Remove part").click();
+  await until(() => !t.app.store.list("parts").some((p) => String(p.id) === id), "part removed after confirm");
+  assert.deepEqual(t.errors, []);
+  await t.close();
+});
