@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS notifications (
   UNIQUE (user_id, dedupe)
 );
 CREATE INDEX IF NOT EXISTS notifications_user ON notifications (user_id, id);
+CREATE TABLE IF NOT EXISTS client_ids (
+  cid TEXT PRIMARY KEY,
+  target TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 `;
 
 export function openDb(path) {
@@ -53,6 +58,9 @@ export function openDb(path) {
   const has = (table, col) => db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
   if (!has("docs", "rev")) db.exec("ALTER TABLE docs ADD COLUMN rev INTEGER NOT NULL DEFAULT 1");
   if (!has("notifications", "sub")) db.exec("ALTER TABLE notifications ADD COLUMN sub TEXT");
+  db.exec(`UPDATE docs SET data = json_remove(json_set(data, '$.drivers', json_array(json_extract(data, '$.driver'))), '$.driver')
+    WHERE coll = 'practice' AND json_extract(data, '$.driver') != ''`);
+  db.exec(`UPDATE docs SET data = json_remove(data, '$.driver') WHERE coll = 'practice' AND json_extract(data, '$.driver') = ''`);
   return db;
 }
 

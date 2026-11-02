@@ -41,11 +41,12 @@ async function browser(base) {
   vc.on("jsdomError", (e) => errors.push(String(e.detail?.stack || e.message)));
   // Only the app's own files load; Google Fonts and anything else off-host is stubbed out.
   const resources = { interceptors: [requestInterceptor((req) => (req.url.startsWith(base) ? undefined : new Response("", { headers: { "Content-Type": "text/css" } })))] };
-  let cookie = "";
+  let cookie = "", online = true;
   const dom = await JSDOM.fromURL(base + "/", {
     runScripts: "dangerously", resources, pretendToBeVisual: true, virtualConsole: vc,
     beforeParse(w) {
       w.fetch = async (url, { signal: _jsdomSignal, ...init } = {}) => {
+        if (!online) throw new TypeError("Failed to fetch");
         const res = await fetch(new URL(url, base), { ...init, headers: { ...(init.headers || {}), ...(cookie ? { Cookie: cookie } : {}) } });
         const sc = res.headers.get("set-cookie");
         if (sc) cookie = sc.split(";")[0];
@@ -72,7 +73,9 @@ async function browser(base) {
     submit(q("[data-login]"));
   };
   const advance = (ms) => { shift += ms; };
-  return { base, w, d, q, fire, type, submit, signIn, advance, errors, close: async () => { w.close(); } };
+  const goOffline = () => { online = false; };
+  const goOnline = () => { online = true; w.dispatchEvent(new w.Event("online")); };
+  return { base, w, d, q, fire, type, submit, signIn, advance, goOffline, goOnline, errors, close: async () => { w.close(); } };
 }
 
 const post = (base, path, body, cookie) => fetch(base + path, {
@@ -275,7 +278,7 @@ test("a viewer can read everything but gets no edit controls", { skip }, async (
   t.w.location.hash = "#/parts"; await tick();
   assert.equal(t.q("[data-addpart]"), null);
   t.w.location.hash = "#/practice"; await tick();
-  assert.equal(t.q("[data-prac]"), null);
+  assert.equal(t.q('[data-act="new-run"]'), null);
   t.w.location.hash = "#/settings"; await tick();
   assert.equal(t.q('[data-set="dname"]').disabled, false, "a viewer can still edit their own profile");
   assert.deepEqual(t.errors, []);
@@ -567,5 +570,244 @@ test("context menus: right-click an issue to change it, with the keyboard too, a
   item("Remove part").click();
   await until(() => !t.app.store.list("parts").some((p) => String(p.id) === id), "part removed after confirm");
   assert.deepEqual(t.errors, []);
+  await t.close();
+});
+
+const go = async (t, route) => { t.w.location.hash = "#/" + route; await tick(); };
+const openDemo = async () => { const t = await open({ demo: true }); await t.signIn("joseph", "innovators"); await until(() => t.q(".ws b"), "app shell"); return t; };
+const fieldValue = (t, sel, v) => { const el = t.q(sel); el.value = v; t.fire(el, "input"); t.fire(el, "change"); };
+
+test("issue titles can be edited, and a blank title puts the old one back", { skip }, async () => {
+  const t = await openDemo();
+  await go(t, "issues/45");
+  fieldValue(t, "[data-title]", "A better title");
+  await until(() => t.app.store.get("issues", 45).title === "A better title", "title saved", 4000);
+  await go(t, "issues/45");
+  fieldValue(t, "[data-title]", "   ");
+  await tick(100);
+  assert.equal(t.q("[data-title]").value, "A better title");
+  assert.equal(t.app.store.get("issues", 45).title, "A better title");
+  assert.deepEqual(t.errors, []);
+  await t.close();
+});
+
+test("notebook: dates and titles edit while drafting, logging locks the entry, and deleting it clears the issue's logged mark", { skip }, async () => {
+  const t = await openDemo();
+  t.w.location.hash = "#/issues/45"; await tick();
+  const status = t.q('[data-field="status"]'); status.value = "done"; t.fire(status, "change");
+  (await until(() => t.q("#toast button"), "draft toast")).click();
+  await until(() => t.q("[data-nbf=date]"), "draft editor");
+
+  fieldValue(t, "[data-nbf=date]", "2026-10-02");
+  fieldValue(t, "[data-nbf=title]", "Connector fix");
+  const entry = () => t.app.store.list("notebook").find((n) => n.issue === 45);
+  await until(() => entry()?.date === "2026-10-02" && entry().title === "Connector fix", "draft fields saved", 4000);
+
+  t.q("[data-finalize]").click();
+  await until(() => t.app.store.get("issues", 45).logged === true && entry().status === "final", "logged");
+  await until(() => t.q("[data-reopen]"), "reopen button");
+  assert.equal(t.q("[data-nbf=problem]").disabled, true, "a logged entry can't be typed in");
+  await until(() => entry().log?.[0]?.what === "logged", "server recorded the logging");
+
+  t.q("[data-reopen]").click();
+  await until(() => entry().status === "draft" && t.app.store.get("issues", 45).logged === false, "reopened");
+  assert.equal(entry().log.at(-1).what, "reopened");
+  assert.equal(t.q("[data-nbf=problem]").disabled, false);
+
+  t.q("[data-finalize]").click();
+  await until(() => t.app.store.get("issues", 45).logged === true, "logged again");
+  await until(() => t.q(`[data-rm^="notebook:"]`), "delete button");
+  t.q(`[data-rm^="notebook:"]`).click();
+  await until(() => t.app.store.get("issues", 45).logged === false, "deleting clears the logged mark");
+  assert.deepEqual(t.errors, []);
+  await t.close();
+});
+
+test("copying says so when the browser refused", { skip }, async () => {
+  const t = await openDemo();
+  await go(t, "issues/45");
+  t.q("[data-copy]").click();
+  await until(() => t.q("#toast")?.textContent, "toast");
+  assert.match(t.q("#toast").textContent, /Couldn't copy/);
+  await t.close();
+});
+
+test("practice: log a run on the score sheet, see it totalled, edit it, and turn it into an issue", { skip }, async () => {
+  const t = await openDemo();
+  await go(t, "practice");
+  assert.ok(t.q(".stat"), "stat tiles");
+  const before = t.app.store.list("practice").length;
+
+  t.q('[data-act="new-run"]').click();
+  const form = await until(() => t.q("[data-runform]"), "run form");
+  form.elements.routine.value = "Close side, 4 tips";
+  const plus = (key) => t.q(`[name="c:${key}"]`).parentElement.querySelector('[data-step="1"]');
+  plus("leave").click(); plus("parkAuto").click(); plus("tipAuto").click();
+  for (let k = 0; k < 3; k++) plus("tipTele").click();
+  assert.match(t.q("#run-total").textContent, /88 points/, "live total: 3 + 5 + 80");
+  assert.match(t.q("#run-total").textContent, /POLLINATOR 1 4\/4/);
+  assert.match(t.q("#run-total").textContent, /POLLINATOR 2 4\/7/);
+  form.elements.fail.value = "jam";
+  t.submit(form);
+  await until(() => t.app.store.list("practice").length === before + 1, "run saved");
+  const run = t.app.store.list("practice").find((r) => r.routine === "Close side, 4 tips");
+  assert.deepEqual(run.counts, { leave: 1, parkAuto: 1, tipAuto: 1, tipTele: 3 });
+  assert.deepEqual(run.drivers, [t.app.store.list("people").find((p) => p.name === "Joseph").id]);
+
+  await until(() => t.q(`[data-run-issue="${run.id}"]`), "make issue button");
+  t.q(`[data-run-issue="${run.id}"]`).click();
+  await until(() => t.app.store.get("practice", run.id).issue, "run linked to an issue");
+  const issue = t.app.store.get("issues", t.app.store.get("practice", run.id).issue);
+  assert.match(issue.title, /Mechanism jammed in Close side, 4 tips/);
+
+  await tick(60);
+  t.q(`[data-run-edit="${run.id}"]`).click();
+  const edit = await until(() => t.q("[data-runform]"), "edit form");
+  assert.equal(edit.elements["c:tipTele"].value, "3");
+  edit.elements["c:tipTele"].value = "6"; t.fire(edit.elements["c:tipTele"], "input");
+  t.submit(edit);
+  await until(() => t.app.store.get("practice", run.id).counts.tipTele === 6, "edit saved");
+  assert.ok(t.app.store.get("practice", run.id).issue, "the issue link survives an edit");
+  assert.deepEqual(t.errors, []);
+  await t.close();
+});
+
+test("practice: an auto-only run drops TeleOp counts, and filters narrow the numbers", { skip }, async () => {
+  const t = await openDemo();
+  await go(t, "practice");
+  t.q('[data-act="new-run"]').click();
+  const form = await until(() => t.q("[data-runform]"), "run form");
+  form.elements["c:tipTele"].value = "4";
+  const kind = form.elements.kind; kind.value = "auto"; t.fire(kind, "change");
+  form.elements.routine.value = "Solo auto";
+  t.submit(form);
+  await until(() => t.app.store.list("practice").some((r) => r.routine === "Solo auto"), "run saved");
+  assert.deepEqual(t.app.store.list("practice").find((r) => r.routine === "Solo auto").counts, {});
+
+  await until(() => t.q("[data-run-filter=runRoutine]"), "filter");
+  const pick = t.q("[data-run-filter=runRoutine]"); pick.value = "Close side, 3 tips"; t.fire(pick, "change");
+  await tick();
+  assert.ok([...t.d.querySelectorAll("tr.run")].every((row) => /Close side, 3 tips/.test(row.textContent)));
+  assert.deepEqual(t.errors, []);
+  await t.close();
+});
+
+test("import: paste cells from a sheet, check the mapping, and only the new rows are added", { skip }, async () => {
+  const t = await openDemo();
+  await go(t, "parts");
+  const known = t.app.store.list("parts")[0].name;
+  const count = t.app.store.list("parts").length;
+  t.q('[data-act="import"]').click();
+  const form = await until(() => t.q("[data-import]"), "import form");
+  assert.equal(t.q("[data-import] .btn.pri").disabled, true);
+  const paste = form.elements.paste;
+  paste.value = `Team parts list\n\nItem\tQty\tOn hand\tCost\tSupplier\tSystem\nUltraplanetary\t2\t1\t$39.99\tREV\tIntake\n${known}\t1\t0\t\t\t\n\t1\t1\t\t\t\n`;
+  t.fire(paste, "input");
+  await until(() => /1 row ready/.test(t.q(".imp-count")?.textContent ?? ""), "preview");
+  assert.equal(t.q("[data-impcol=name]").value, "0");
+  assert.match(t.q("#imp-body").textContent, /2 rows left out/);
+  t.submit(form);
+  await until(() => t.app.store.list("parts").length === count + 1, "part imported");
+  const part = t.app.store.list("parts").find((p) => p.name === "Ultraplanetary");
+  assert.deepEqual([part.need, part.have, part.price, part.vendor, part.sub], [2, 1, 39.99, "REV", "intake"]);
+  await until(() => [...t.d.querySelectorAll("tr[data-part]")].some((r) => /Ultraplanetary/.test(r.textContent)), "shown in the table");
+  assert.deepEqual(t.errors, []);
+  await t.close();
+});
+
+test("offline: edits, comments, new issues, notebook drafts and logged runs wait on the device, then reach the server in order", { skip }, async () => {
+  const t = await openDemo();
+  const teammate = await t.browser();
+  await teammate.signIn("mika", "innovators");
+  await until(() => teammate.q(".ws b"), "teammate signed in");
+  await go(t, "issues/45");
+  t.goOffline();
+
+  const status = t.q('[data-field="status"]'); status.value = "doing"; t.fire(status, "change");
+  await until(() => /Offline, 1 saved here/.test(t.q("#net").textContent), "offline pill");
+  assert.equal(t.q("#net").hidden, false);
+  assert.equal(t.app.store.get("issues", 45).status === "doing", false, "nothing reached the server");
+
+  await go(t, "issues/45");
+  const comment = t.q("[data-cmt]"); comment.elements.t.value = "Comment from the pit."; t.submit(comment);
+  await tick();
+
+  t.d.dispatchEvent(new t.w.KeyboardEvent("keydown", { key: "c" }));
+  const newIssue = await until(() => t.q("[data-new]"), "new issue modal");
+  newIssue.elements.title.value = "Fix the pit cart";
+  t.submit(newIssue);
+  await until(() => [...t.d.querySelectorAll(".row, .card, #toast")].some((el) => /FTC-new/.test(el.textContent)), "local issue shown");
+  const local = t.w.FTC.issues.find((i) => i.title === "Fix the pit cart");
+  assert.ok(local.id < 0, "a local number until it syncs");
+
+  await go(t, "issues/" + local.id);
+  const s = t.q('[data-field="status"]'); s.value = "done"; t.fire(s, "change");
+  (await until(() => t.q("#toast button"), "draft toast")).click();
+  await until(() => t.q("[data-nbf=problem]"), "draft on a local issue");
+
+  await go(t, "practice");
+  t.q('[data-act="new-run"]').click();
+  const run = await until(() => t.q("[data-runform]"), "run form");
+  run.elements.routine.value = "Logged at the event"; t.submit(run);
+  await until(() => t.w.FTC.practice.some((r) => r.routine === "Logged at the event"), "run kept locally");
+
+  await go(t, "settings");
+  t.q('[data-set-tab="workspace"]').click(); await tick();
+  fieldValue(t, '[data-set="budget"]', "999");
+  await until(() => /offline/i.test(t.q("#toast").textContent), "settings say they need a connection", 2000);
+
+  const teammateIssue = t.app.store.get("issues", 45);
+  t.app.store.put("issues", 45, { ...teammateIssue, pri: "low" }, "someone");
+
+  t.goOnline();
+  await until(() => t.app.store.list("practice").some((r) => r.routine === "Logged at the event"), "run synced", 4000);
+  await until(() => t.q("#net").hidden, "queue drained", 4000);
+  const issues = t.app.store.list("issues"), synced = issues.find((i) => i.title === "Fix the pit cart");
+  assert.ok(synced.id > 0);
+  assert.equal(synced.status, "done");
+  const merged = t.app.store.get("issues", 45);
+  assert.equal(merged.status, "doing");
+  assert.equal(merged.pri, "low", "a teammate's change to another field is kept");
+  assert.ok(merged.notes.some((n) => n.text === "Comment from the pit."));
+  assert.equal(t.app.store.list("notebook").find((n) => n.title === "Fix the pit cart").issue, synced.id, "the draft points at the real number");
+  assert.equal(issues.filter((i) => i.title === "Fix the pit cart").length, 1);
+  assert.equal(t.w.FTC.issues.some((i) => i.id < 0), false);
+  assert.deepEqual(t.errors, []);
+  await t.close();
+});
+
+test("offline: a change that can't be applied is kept and shown, not lost", { skip }, async () => {
+  const t = await openDemo();
+  await go(t, "issues/45");
+  t.goOffline();
+  const status = t.q('[data-field="status"]'); status.value = "doing"; t.fire(status, "change");
+  await until(() => /saved here/.test(t.q("#net").textContent), "queued");
+  t.app.store.del("issues", 45);
+
+  t.goOnline();
+  await until(() => /didn't sync/.test(t.q("#net").textContent), "failure shown", 4000);
+  t.q("#net").click();
+  await until(() => /deleted this/.test(t.q("#modal").textContent), "reason shown");
+  t.q("[data-sync-drop]").click();
+  await until(() => !t.q("[data-sync-drop]"), "discarded");
+  await tick(60);
+  assert.equal(t.q("#net").hidden, true);
+  assert.deepEqual(t.errors, []);
+  await t.close();
+});
+
+test("offline: signing out waits for a connection, and a saved copy opens the app when the server can't be reached", { skip }, async () => {
+  const t = await openDemo();
+  await tick(60);
+  t.goOffline();
+  await go(t, "issues/45");
+  const status = t.q('[data-field="status"]'); status.value = "doing"; t.fire(status, "change");
+  await until(() => /saved here/.test(t.q("#net").textContent), "queued");
+  t.q('[data-act="logout"]').click();
+  await until(() => /Sign out once/.test(t.q("#toast").textContent), "sign out refused");
+  assert.ok(t.q(".ws b"), "still in the app");
+
+  const saved = JSON.parse(t.w.localStorage.getItem("008-state"));
+  assert.ok(saved.state.issues.length > 5, "a copy of the team's data is on the device");
   await t.close();
 });

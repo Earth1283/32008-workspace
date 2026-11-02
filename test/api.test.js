@@ -259,9 +259,14 @@ test("other collections validate and persist", async () => {
   assert.equal(r.status, 201);
   assert.equal((await a.post("/api/parts", { name: "Bad", have: -1 })).status, 400);
 
-  r = await a.post("/api/practice", { date: "2026-10-21", driver: "x", auto: 7, cycle: 31, note: "good" });
+  r = await a.post("/api/practice", { date: "2026-10-21", kind: "full", sheet: "biobuzz", counts: { leave: 1, tipTele: 4 }, drivers: ["x"], routine: "Close side", note: "good" });
   assert.equal(r.status, 201);
-  assert.equal((await a.post("/api/practice", { date: "2026-10-21", auto: 11, cycle: 31 })).status, 400);
+  assert.deepEqual(r.data.counts, { leave: 1, tipTele: 4 });
+  assert.equal((await a.post("/api/practice", { date: "2026-10-21", sheet: "biobuzz", counts: { leave: 3 } })).status, 400, "only 2 robots can LEAVE");
+  assert.equal((await a.post("/api/practice", { date: "2026-10-21", sheet: "biobuzz", counts: { shots: 1 } })).status, 400, "not on the sheet");
+  assert.equal((await a.post("/api/practice", { date: "2026-10-21", sheet: "biobuzz", counts: { leave: -1 } })).status, 400);
+  assert.equal((await a.post("/api/practice", { date: "2026-10-21", sheet: "nope" })).status, 400);
+  assert.equal((await a.post("/api/practice", { date: "2026-10-21", drivers: ["a", "b", "c", "d"] })).status, 400, "at most 3 drivers");
 
   r = await a.post("/api/meetings", { date: "2026-10-25", title: "Build day", who: [], agenda: ["a"], notes: "", actions: [{ id: "a1", text: "Do it", who: "x" }] });
   assert.equal(r.status, 201);
@@ -553,4 +558,85 @@ test("team inboxes: followers see a subsystem's activity, without doubling up di
   assert.equal((await inbox(admin)).filter((n) => n.kind === "team").length, 0);
   assert.equal((await teamBox()).length, 6);
   await t.close();
+});
+
+test("a create sent twice with the same client id happens once", async () => {
+  const t = await boot();
+  const a = t.client();
+  await a.post("/api/setup", SETUP);
+  const first = await a.post("/api/issues", issue({ cid: "client-id-1" }));
+  const again = await a.post("/api/issues", issue({ cid: "client-id-1" }));
+  assert.equal(first.status, 201);
+  assert.equal(again.status, 200);
+  assert.equal(again.data.id, first.data.id);
+  assert.equal((await a.get("/api/state")).data.issues.length, 1);
+  assert.notEqual((await a.post("/api/issues", issue({ cid: "client-id-2" }))).data.id, first.data.id);
+  assert.equal((await a.post("/api/parts", { name: "x", cid: "no spaces allowed" })).status, 201, "a bad id is ignored, not fatal");
+  await t.close();
+});
+
+test("import: all rows or none, members only, and a repeat changes nothing", async () => {
+  const t = await boot();
+  const a = t.client();
+  await a.post("/api/setup", SETUP);
+  const parts = [{ name: "Bolt", need: 4 }, { name: "Nut", need: 8, price: 0.1 }];
+  let r = await a.post("/api/import", { coll: "parts", rows: [...parts, { name: "" }] });
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /Row 3/);
+  assert.equal((await a.get("/api/state")).data.parts.length, 0, "one bad row stops the whole import");
+
+  r = await a.post("/api/import", { coll: "parts", rows: parts, cid: "import-0001" });
+  assert.deepEqual([r.status, r.data.created], [201, 2]);
+  r = await a.post("/api/import", { coll: "parts", rows: parts, cid: "import-0001" });
+  assert.equal(r.data.created, 2);
+  assert.equal((await a.get("/api/state")).data.parts.length, 2, "the repeat added nothing");
+
+  r = await a.post("/api/import", { coll: "issues", rows: [issue(), issue({ title: "Second" })] });
+  assert.equal(r.data.created, 2);
+  assert.deepEqual((await a.get("/api/state")).data.issues.map((i) => i.id), [1, 2]);
+
+  assert.equal((await a.post("/api/import", { coll: "people", rows: [{}] })).status, 400);
+  assert.equal((await a.post("/api/import", { coll: "parts", rows: [] })).status, 400);
+  assert.equal((await a.post("/api/import", { coll: "parts", rows: Array(2001).fill({ name: "x" }) })).status, 413);
+  await t.close();
+});
+
+test("notebook entries record being logged, reopened and changed afterwards", async () => {
+  const t = await boot();
+  const a = t.client();
+  await a.post("/api/setup", SETUP);
+  let r = await a.post("/api/notebook", { date: "2026-10-23", title: "Entry", status: "draft", log: [{ who: "fake", date: "2020-01-01", what: "logged" }] });
+  assert.deepEqual(r.data.log, [], "the record can't be written by the client");
+  const id = r.data.id;
+  const putAs = async (doc) => (await a.put(`/api/notebook/${id}`, doc)).data;
+
+  let doc = await putAs({ ...r.data, status: "final" });
+  assert.deepEqual(doc.log.map((x) => x.what), ["logged"]);
+  doc = await putAs({ ...doc, result: "Worked" });
+  assert.deepEqual(doc.log.map((x) => x.what), ["logged", "edited"]);
+  doc = await putAs({ ...doc, result: "Worked well" });
+  assert.equal(doc.log.length, 2, "more edits the same day add no new line");
+  doc = await putAs({ ...doc, status: "draft" });
+  assert.deepEqual(doc.log.map((x) => x.what), ["logged", "edited", "reopened"]);
+  doc = await putAs({ ...doc, result: "Draft text" });
+  assert.equal(doc.log.length, 3, "edits to a draft aren't recorded");
+  await t.close();
+});
+
+test("runs saved before the score sheet keep their driver", async () => {
+  const { openDb, makeStore } = await import("../server/db.js");
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "008-")), path = join(dir, "old.db");
+  let db = openDb(path);
+  makeStore(db).put("practice", "old", { date: "2026-10-01", driver: "dv", auto: 4, cycle: 40 }, "x");
+  makeStore(db).put("practice", "blank", { date: "2026-10-02", driver: "", auto: 4, cycle: 40 }, "x");
+  db.close();
+  db = openDb(path);
+  assert.deepEqual(makeStore(db).get("practice", "old").drivers, ["dv"]);
+  assert.equal(makeStore(db).get("practice", "old").driver, undefined);
+  assert.equal(makeStore(db).get("practice", "blank").drivers, undefined);
+  assert.equal(makeStore(db).get("practice", "blank").driver, undefined);
+  db.close();
+  rmSync(dir, { recursive: true });
 });

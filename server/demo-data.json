@@ -418,45 +418,205 @@
  "practice": [
   {
    "date": "2026-10-08",
-   "driver": "dv",
-   "auto": 3,
+   "kind": "full",
+   "sheet": "biobuzz",
+   "counts": {
+    "leave": 1,
+    "parkAuto": 1,
+    "tipTele": 1,
+    "garden": 6,
+    "parkEnd": 1
+   },
+   "drivers": [
+    "dv"
+   ],
+   "routine": "Far side, park only",
+   "version": "a41c9e2",
+   "fail": "jam",
    "cycle": 41,
    "note": "First full-field run. Intake jammed twice."
   },
   {
    "date": "2026-10-10",
-   "driver": "jc",
-   "auto": 4,
-   "cycle": 38,
-   "note": ""
+   "kind": "auto",
+   "sheet": "biobuzz",
+   "counts": {
+    "leave": 1,
+    "parkAuto": 1,
+    "tipAuto": 1
+   },
+   "drivers": [
+    "jc"
+   ],
+   "routine": "Close side, 2 tips",
+   "version": "a41c9e2"
+  },
+  {
+   "date": "2026-10-12",
+   "kind": "full",
+   "sheet": "biobuzz",
+   "counts": {
+    "leave": 1,
+    "parkAuto": 1,
+    "tipAuto": 1,
+    "tipTele": 1,
+    "cell": 3,
+    "garden": 7,
+    "parkEnd": 1
+   },
+   "drivers": [
+    "dv"
+   ],
+   "routine": "Close side, 2 tips",
+   "version": "b77d013",
+   "cycle": 38
   },
   {
    "date": "2026-10-14",
-   "driver": "dv",
-   "auto": 4,
+   "kind": "full",
+   "sheet": "biobuzz",
+   "counts": {
+    "leave": 1,
+    "parkAuto": 1,
+    "tipAuto": 1,
+    "tipTele": 1,
+    "garden": 5,
+    "parkEnd": 1
+   },
+   "drivers": [
+    "dv"
+   ],
+   "routine": "Close side, 2 tips",
+   "version": "b77d013",
+   "fail": "power",
    "cycle": 36,
    "note": "Brownout at 1:40."
   },
   {
+   "date": "2026-10-15",
+   "kind": "full",
+   "sheet": "biobuzz",
+   "counts": {
+    "leave": 1,
+    "tipAuto": 1,
+    "tipTele": 2,
+    "cell": 2,
+    "garden": 8,
+    "parkEnd": 1
+   },
+   "drivers": [
+    "tm"
+   ],
+   "routine": "Close side, 2 tips",
+   "version": "b77d013",
+   "cycle": 34
+  },
+  {
    "date": "2026-10-17",
-   "driver": "jc",
-   "auto": 6,
+   "kind": "full",
+   "sheet": "biobuzz",
+   "counts": {
+    "leave": 1,
+    "parkAuto": 1,
+    "tipAuto": 2,
+    "tipTele": 1,
+    "cell": 4,
+    "flower": 3,
+    "garden": 6,
+    "parkEnd": 1
+   },
+   "drivers": [
+    "dv",
+    "tm"
+   ],
+   "routine": "Close side, 3 tips",
+   "version": "c02e5f1",
+   "fail": "auto",
    "cycle": 33,
-   "note": "New ff values helped a lot."
+   "note": "Third launch missed the upward cell."
+  },
+  {
+   "date": "2026-10-18",
+   "kind": "auto",
+   "sheet": "biobuzz",
+   "counts": {
+    "leave": 1,
+    "parkAuto": 1,
+    "tipAuto": 3
+   },
+   "drivers": [
+    "jc"
+   ],
+   "routine": "Close side, 3 tips",
+   "version": "c02e5f1"
   },
   {
    "date": "2026-10-19",
-   "driver": "dv",
-   "auto": 5,
-   "cycle": 34,
-   "note": "Odometry drift on the long leg."
+   "kind": "full",
+   "sheet": "biobuzz",
+   "counts": {
+    "leave": 1,
+    "parkAuto": 1,
+    "tipAuto": 3,
+    "tipTele": 2,
+    "cell": 4,
+    "flower": 4,
+    "bottom": 1,
+    "garden": 7,
+    "parkEnd": 1
+   },
+   "drivers": [
+    "dv"
+   ],
+   "routine": "Close side, 3 tips",
+   "version": "c02e5f1",
+   "cycle": 31
   },
   {
    "date": "2026-10-21",
-   "driver": "jc",
-   "auto": 7,
-   "cycle": 31,
-   "note": "Best session so far."
+   "kind": "full",
+   "sheet": "biobuzz",
+   "counts": {
+    "leave": 1,
+    "parkAuto": 1,
+    "tipAuto": 3,
+    "tipTele": 2,
+    "cell": 5,
+    "flower": 5,
+    "bottom": 1,
+    "garden": 8,
+    "parkEnd": 1
+   },
+   "drivers": [
+    "dv",
+    "tm"
+   ],
+   "routine": "Close side, 3 tips",
+   "version": "d9913ab",
+   "cycle": 30
+  },
+  {
+   "date": "2026-10-22",
+   "kind": "full",
+   "sheet": "biobuzz",
+   "counts": {
+    "leave": 1,
+    "parkAuto": 1,
+    "tipAuto": 2,
+    "tipTele": 3,
+    "cell": 3,
+    "flower": 2,
+    "garden": 9,
+    "minor": 1
+   },
+   "drivers": [
+    "tm"
+   ],
+   "routine": "Close side, 3 tips",
+   "version": "d9913ab",
+   "fail": "driver",
+   "cycle": 32,
+   "note": "Missed the park at the buzzer."
   }
  ],
  "meetings": [

@@ -13,6 +13,7 @@
     setTab: "profile", density: "comfortable", accent: "",
     prefs: { due: true, blocked: true, mention: true, pr: true, digest: false, follow: [] },
     inbox: [], github: {}, autoPr: true, ask: false, aiOn: true, iboxTab: "you",
+    runRoutine: "", runDriver: "", imp: null,
   };
   const ACCENTS = [["", "Steel blue", "#1A6FA8"], ["#38BDF8", "Sky", "#38BDF8"], ["#14B8A6", "Teal", "#14B8A6"], ["#22A06B", "Green", "#22A06B"],
     ["#E5A93B", "Amber", "#E5A93B"], ["#F07A3C", "Orange", "#F07A3C"], ["#E5484D", "Red", "#E5484D"], ["#8B9099", "Graphite", "#8B9099"]];
@@ -31,17 +32,40 @@
 
   /* ---------- server access ---------- */
   const CLIENT = Math.random().toString(36).slice(2, 10);
+  const REQUEST_TIMEOUT_MS = 15_000;
+  const STARTUP_TIMEOUT_MS = 5_000;
+  const RECONNECT_CHECK_MS = 10_000;
+  const SYNC_RETRY_MS = 5_000;
+  const PROXY_CANT_REACH_SERVER = [502, 503, 504];
   const pending = new Set();
+  const net = { offline: false, syncing: false, checking: false, checkTimer: null, asOf: null, clobbered: false };
+  let queue = null;
 
+  const device = (() => { try { return window.localStorage; } catch (e) { return null; } })();
+  const giveUpAfter = (ms) => (AbortSignal.timeout ? AbortSignal.timeout(ms) : undefined);
+  const gaveUp = (signal) => !!signal && !!signal.aborted && !!signal.reason && signal.reason.name === "TimeoutError";
+  function disconnected() {
+    const err = new Error("You're offline. This needs a connection.");
+    err.net = true;
+    return err;
+  }
   async function call(method, url, body, signal) {
-    const r = await fetch(url, {
-      method, credentials: "same-origin", signal,
-      headers: { "Content-Type": "application/json", "X-Client": CLIENT },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    let r;
+    try {
+      r = await fetch(url, {
+        method, credentials: "same-origin", signal: signal ?? giveUpAfter(REQUEST_TIMEOUT_MS),
+        headers: { "Content-Type": "application/json", "X-Client": CLIENT },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    } catch (e) {
+      if (signal && signal.aborted && !gaveUp(signal)) throw e;
+      markOffline();
+      throw disconnected();
+    }
     let data = null;
     try { data = await r.json(); } catch (e) { /* no body */ }
     if (!r.ok) {
+      if (PROXY_CANT_REACH_SERVER.includes(r.status) && !url.endsWith("/ask")) { markOffline(); throw disconnected(); }
       const err = new Error((data && data.error) || r.statusText || "Request failed");
       err.status = r.status;
       err.data = data;
@@ -56,7 +80,8 @@
     tracked.then(() => pending.delete(tracked));
     return p;
   }
-  const write = (method, url, body) => track(call(method, url, body));
+  const write = (method, url, body) => (net.offline ? Promise.reject(disconnected()) : track(call(method, url, body)));
+  const shouldQueue = () => net.offline || (!!queue && queue.pendingCount() > 0);
   function writeFailed(e) {
     if (e.status === 401) return;
     toast(e.message || "Could not save that change");
@@ -120,11 +145,19 @@
   function persist(coll, doc) {
     const key = coll + doc.id;
     clearTimeout(timers.get(key));
+    if (shouldQueue()) { queueSave(coll, doc); return Promise.resolve(); }
     const p = (queues.get(key) || Promise.resolve()).then(() => save(coll, doc));
     const settled = p.catch(() => {});
     queues.set(key, settled);
     settled.then(() => { if (queues.get(key) === settled) queues.delete(key); });
-    return track(p).catch(writeFailed);
+    return track(p).catch((e) => (e.net ? queueSave(coll, doc) : writeFailed(e)));
+  }
+  function queueSave(coll, doc) {
+    queueSafely(() => queue.save(coll, doc, base.get(doc)));
+  }
+  function queueSafely(fn) {
+    try { fn(); } catch (e) { toast("This device is out of storage, so that change couldn't be kept."); }
+    paintNet();
   }
   const timers = new Map();
   const soon = (key, fn, ms = 450) => { clearTimeout(timers.get(key)); timers.set(key, setTimeout(() => { timers.delete(key); fn(); }, ms)); };
@@ -136,7 +169,8 @@
   function markRead(ids) {
     const all = ids === "all";
     for (const n of S.inbox) if (all || ids.includes(n.id)) n.read = true;
-    return write("POST", "/api/notifications/read", all ? { all: true } : { ids }).catch(writeFailed);
+    if (shouldQueue()) return queueSafely(() => queue.markRead(ids));
+    return write("POST", "/api/notifications/read", all ? { all: true } : { ids }).catch((e) => (e.net ? queueSafely(() => queue.markRead(ids)) : writeFailed(e)));
   }
 
   const SORT = {
@@ -145,16 +179,32 @@
     milestones: (a, b) => a.date.localeCompare(b.date),
     phases: (a, b) => a.start.localeCompare(b.start),
   };
-  async function create(coll, doc) {
-    const r = await write("POST", `/api/${coll}`, doc);
-    remember(r);
-    F[coll].push(r);
+  const SYNCED_COLLECTIONS = ["milestones", "phases", "issues", "parts", "practice", "meetings", "notebook"];
+  const newClientId = () => `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+  const newLocalId = (coll) => (coll === "issues" ? -(Date.now() % 1e12 + Math.floor(Math.random() * 1000)) : "new" + newClientId());
+
+  function addLocally(coll, doc) {
+    remember(doc);
+    F[coll].push(doc);
     if (SORT[coll]) F[coll].sort(SORT[coll]);
-    return r;
+    return doc;
+  }
+  async function create(coll, doc) {
+    const cid = newClientId();
+    if (!shouldQueue()) {
+      try { return addLocally(coll, await write("POST", `/api/${coll}`, { ...doc, cid })); } catch (e) { if (!e.net) throw e; }
+    }
+    const id = newLocalId(coll);
+    queueSafely(() => queue.create(coll, id, cid, doc));
+    return addLocally(coll, { ...doc, id, rev: 0 });
   }
   async function remove(coll, id) {
-    await write("DELETE", `/api/${coll}/${id}`);
-    F[coll] = F[coll].filter((x) => String(x.id) !== String(id));
+    const dropLocally = () => { F[coll] = F[coll].filter((x) => String(x.id) !== String(id)); };
+    if (!shouldQueue()) {
+      try { await write("DELETE", `/api/${coll}/${id}`); return dropLocally(); } catch (e) { if (!e.net) throw e; }
+    }
+    queueSafely(() => queue.remove(coll, id));
+    dropLocally();
   }
 
   function applyState(st) {
@@ -171,12 +221,25 @@
     S.inbox = st.inbox;
     S.github = st.github || {};
     F.people = st.people;
-    for (const k of ["milestones", "phases", "issues", "parts", "practice", "meetings", "notebook"]) { F[k] = st[k]; F[k].forEach(remember); }
+    for (const k of SYNCED_COLLECTIONS) { F[k] = st[k]; if (SORT[k]) F[k].sort(SORT[k]); F[k].forEach(remember); }
+  }
+  const withQueuedChanges = (st) => (queue ? queue.overlay(st) : st);
+  function adopt(st) {
+    Offline.saveState(device, st);
+    net.asOf = Date.now();
+    applyState(withQueuedChanges(st));
+  }
+  function applySavedCopy() {
+    const saved = Offline.loadState(device);
+    if (saved) applyState(withQueuedChanges(saved.state));
   }
   async function refresh() {
     if (!S.ready) return;
     await Promise.allSettled([...pending]);
-    try { applyState(await call("GET", "/api/state")); } catch (e) { return; }
+    if (net.offline) applySavedCopy();
+    else {
+      try { adopt(await call("GET", "/api/state")); } catch (e) { if (e.net) applySavedCopy(); else return; }
+    }
     rerenderIfIdle();
   }
   let refreshTimer;
@@ -193,8 +256,133 @@
     if (typeof EventSource === "undefined") return;
     const es = new EventSource("/api/events");
     es.addEventListener("change", (e) => { try { if (JSON.parse(e.data).by !== CLIENT) refreshSoon(); } catch (err) { /* ignore */ } });
-    es.addEventListener("open", () => { if (S.sseSeen) refreshSoon(); S.sseSeen = true; });
+    es.addEventListener("open", () => { if (S.sseSeen) refreshSoon(); S.sseSeen = true; if (queue && queue.pendingCount()) syncQueue(); });
+    es.addEventListener("error", checkConnection);
     S.es = es;
+  }
+
+  /* ---------- working offline ----------
+     Any failed request marks the app offline. From then on changes wait in the queue and a timer keeps checking for
+     the server. Once it answers, the queue goes out in order, then the screen reloads from the server. */
+  function markOffline() {
+    if (!S.ready || net.offline) return;
+    net.offline = true;
+    clearInterval(net.checkTimer);
+    net.checkTimer = setInterval(checkConnection, RECONNECT_CHECK_MS);
+    paintNet();
+  }
+  function markOnline() {
+    if (!net.offline) return;
+    stopChecking();
+    paintNet();
+    connectEvents();
+    syncQueue();
+    refreshSoon();
+  }
+  async function checkConnection() {
+    if (!S.ready || net.checking) return;
+    net.checking = true;
+    try {
+      const session = await call("GET", "/api/session");
+      if (!session.user) sessionEnded(); else markOnline();
+    } catch (e) { /* still offline; call() has already said so */ }
+    net.checking = false;
+  }
+
+  const OP_NOUN = { issues: "issue", notebook: "notebook entry", practice: "run", meetings: "meeting", parts: "part" };
+  const OP_VERB = { create: "New", save: "Changed", remove: "Deleted" };
+  function opLabel(op) {
+    if (op.type === "read") return "Inbox items marked as read";
+    const name = op.doc && (op.doc.title || op.doc.name || op.doc.routine);
+    return `${OP_VERB[op.type]} ${OP_NOUN[op.coll] || op.coll}${name ? ": " + name : ""}`;
+  }
+  const countOf = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+  function paintNet() {
+    const el = $("#net");
+    if (!el) return;
+    const waiting = queue ? queue.pendingCount() : 0, failed = queue ? queue.failedCount() : 0;
+    const text = net.syncing ? `Syncing ${countOf(waiting, "change")}`
+      : failed ? `${countOf(failed, "change")} didn't sync`
+      : net.offline ? (waiting ? `Offline, ${waiting} saved here` : "Offline")
+      : waiting ? `${countOf(waiting, "change")} waiting` : "";
+    el.hidden = !S.ready || !text;
+    el.textContent = text;
+    el.className = failed ? "bad" : net.offline ? "off" : "";
+  }
+
+  function followNewId(op, saved) {
+    const local = op.target;
+    queue.resolve(op.coll, local, saved.id);
+    const doc = F[op.coll].find((x) => String(x.id) === String(local));
+    if (doc) { doc.id = saved.id; doc.rev = saved.rev; base.set(doc, saved); }
+    if (op.coll === "issues") for (const coll of ["notebook", "practice", "meetings"]) for (const d of F[coll]) Offline.repoint(coll, d, local, saved.id);
+    if (String(S.arg) === String(local)) { S.arg = String(saved.id); history.replaceState(null, "", `#/${S.route}/${saved.id}`); }
+    if (S.nbSel === local) S.nbSel = saved.id;
+    if (S.mtSel === local) S.mtSel = saved.id;
+  }
+  async function sendSave(op) {
+    let doc = op.doc, was = op.was;
+    for (let attempt = 0; ; attempt++) {
+      try { return await call("PUT", `/api/${op.coll}/${op.target}`, doc); } catch (e) {
+        const current = e.status === 409 && e.data && e.data.current;
+        if (!current || attempt >= 3) throw e;
+        const merged = merge(was, doc, current, SETS[op.coll] || []);
+        if (merged.clobbered) net.clobbered = true;
+        doc = merged.doc; was = current;
+      }
+    }
+  }
+  async function send(op) {
+    if (op.type === "read") return call("POST", "/api/notifications/read", op.ids === "all" ? { all: true } : { ids: op.ids });
+    if (op.type === "save") return sendSave(op);
+    if (op.type === "remove") {
+      try { return await call("DELETE", `/api/${op.coll}/${op.target}`); } catch (e) { if (e.status === 404) return null; throw e; }
+    }
+    const saved = await call("POST", `/api/${op.coll}`, { ...op.doc, cid: op.cid });
+    followNewId(op, saved);
+    return saved;
+  }
+  const syncFailure = (op, e) => (e.status === 404 ? "A teammate deleted this while you were offline." : e.message);
+
+  async function syncQueue() {
+    if (!queue || net.syncing || net.offline || !queue.pendingCount()) return;
+    if (!Offline.takeLease(device, CLIENT)) { clearTimeout(net.syncRetry); net.syncRetry = setTimeout(syncQueue, SYNC_RETRY_MS); return; }
+    net.syncing = true;
+    net.clobbered = false;
+    paintNet();
+    let sent = 0;
+    for (let op = queue.next(); op && !net.offline; op = queue.next()) {
+      Offline.takeLease(device, CLIENT);
+      try {
+        const saved = await send(op);
+        queue.finish(op.id, op.v, saved || {});
+        sent++;
+      } catch (e) {
+        if (e.net || e.status === 401) break;
+        queue.fail(op.id, syncFailure(op, e));
+      }
+      paintNet();
+    }
+    net.syncing = false;
+    Offline.releaseLease(device, CLIENT);
+    paintNet();
+    if (!sent) return;
+    const failed = queue ? queue.failedCount() : 0;
+    toast(failed ? `Synced ${countOf(sent, "change")}. ${failed} didn't go through.` : net.clobbered ? `Synced ${countOf(sent, "change")}. Where a teammate changed the same thing, your version was kept.` : `Synced ${countOf(sent, "change")}.`);
+    refresh();
+  }
+
+  function syncDialog() {
+    const ops = queue ? queue.all() : [];
+    const saved = Offline.loadState(device);
+    const asOf = net.asOf || (saved && saved.at);
+    const reopen = window.isSecureContext && "serviceWorker" in navigator;
+    showModal(`<div><div class="hd">${net.offline ? "You're offline" : "Syncing"}</div><div class="bd">
+      <p class="dim">${net.offline ? "Changes you make are saved on this device and sent when the server is back." : "Changes from this device are going to the server."}${asOf ? ` Team data is from ${esc(ago(asOf))}.` : ""}</p>
+      ${reopen ? "" : '<p class="dim" style="margin-top:8px">This address isn\'t HTTPS, so keep this tab open: the app can\'t reopen without a connection.</p>'}
+      ${ops.length ? `<div class="sync-list">${ops.map((op) => `<div class="li"><span class="t">${esc(opLabel(op))}${op.failed ? `<small class="err">${esc(op.failed)}</small>` : ""}</span>${op.failed ? `<button class="btn" data-sync-retry="${esc(op.id)}">Retry</button><button class="btn ghost" data-sync-drop="${esc(op.id)}">Discard</button>` : ""}</div>`).join("")}</div>` : ""}
+    </div><div class="ft"><button class="btn pri" data-act="close-modal">Done</button></div></div>`);
   }
 
   /* ---------- appearance ---------- */
@@ -204,11 +392,11 @@
   const isAdmin = () => !!S.user && S.user.access === "Admin";
   const canWrite = () => !!S.user && S.user.access !== "Viewer";
   /** Controls that only make sense for someone who can change things. Removed for viewers. */
-  const WRITE_ONLY = '[data-write], [data-act="new"], [data-act^="new-"], [data-rm], [data-draft], [data-finalize], [data-mkissue], [data-agenda-rm], [data-action-rm], form[data-cmt], form[data-agenda], form[data-action], form[data-addpart]';
+  const WRITE_ONLY = '[data-write], [data-act="new"], [data-act^="new-"], [data-rm], [data-draft], [data-finalize], [data-mkissue], [data-agenda-rm], [data-action-rm], [data-reopen], [data-run-issue], [data-act="import"], form[data-cmt], form[data-agenda], form[data-action], form[data-addpart]';
   function lockPage() {
     const page = $("#page");
     page.querySelectorAll(WRITE_ONLY).forEach((el) => el.remove());
-    page.querySelectorAll("input, textarea, select, [data-attend]").forEach((el) => { if (!el.matches("[data-subf]")) el.disabled = true; });
+    page.querySelectorAll("input, textarea, select, [data-attend]").forEach((el) => { if (!el.matches("[data-subf], [data-run-filter]")) el.disabled = true; });
     page.querySelectorAll("[data-drag]").forEach((el) => { el.draggable = false; });
   }
   const renderSide = () => { $("#side").innerHTML = sideHtml(); };
@@ -296,8 +484,9 @@
   }
 
   const REVEAL = {
+    practice: ".stat, .chart, .blk, tbody tr, .empty",
     home: ".hero, .blk", issues: ".gh, .row, .col, .empty", season: ".hero, .gantt, .blk, .empty", inbox: ".follow, .li, .empty",
-    parts: ".hero, .form, tbody tr, .empty", practice: ".chart, .blk, tbody tr, .empty",
+    parts: ".hero, .form, tbody tr, .empty",
     notebook: ".pl > *, .pr > *", meetings: ".pl > *, .pr > *, .page > .empty", settings: ".pl > *, .pr > *",
     pit: ".pitwrap header, .pit-grid > div, .pit-two h3, .pit-two p",
   };
@@ -377,6 +566,7 @@
 
   /* ---------- queries ---------- */
   const byId = (id) => F.issues.find((i) => i.id === +id);
+  const ftc = (id) => (id < 0 ? "FTC-new" : "FTC-" + id);
   const isOpen = (i) => i.status !== "done";
   const debt = () => F.issues.filter((i) => i.status === "done" && !i.logged);
   const mine = () => F.issues.filter((i) => i.who.includes(F.me) && isOpen(i));
@@ -440,6 +630,10 @@
     search: '<circle cx="7" cy="7" r="4"/><path d="m10 10 3.5 3.5"/>',
     inbox: '<path d="M2 9.5 3.8 3.4a1 1 0 0 1 1-.7h6.4a1 1 0 0 1 1 .7L14 9.5V13a.5.5 0 0 1-.5.5h-11A.5.5 0 0 1 2 13Z"/><path d="M2 9.5h3.5l1 1.5h3l1-1.5H14"/>',
     gear: '<path d="M6.77 3.05L6.97 1.48L9.03 1.48L9.23 3.05L10.63 3.63L11.88 2.66L13.34 4.12L12.37 5.37L12.95 6.77L14.52 6.97L14.52 9.03L12.95 9.23L12.37 10.63L13.34 11.88L11.88 13.34L10.63 12.37L9.23 12.95L9.03 14.52L6.97 14.52L6.77 12.95L5.37 12.37L4.12 13.34L2.66 11.88L3.63 10.63L3.05 9.23L1.48 9.03L1.48 6.97L3.05 6.77L3.63 5.37L2.66 4.12L4.12 2.66L5.37 3.63Z"/><circle cx="8" cy="8" r="2.1"/>',
+    plus: '<path d="M8 3.5v9M3.5 8h9"/>',
+    minus: '<path d="M3.5 8h9"/>',
+    check: '<path d="M3.5 8.3 6.6 11.4 12.5 4.8"/>',
+    upload: '<path d="M8 10.5v-8M4.8 5.5 8 2.3l3.2 3.2M2.5 10.5v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/>',
     git: '<circle cx="4.5" cy="4" r="1.6"/><circle cx="4.5" cy="12" r="1.6"/><circle cx="11.5" cy="6.5" r="1.6"/><path d="M4.5 5.6v4.8M11.5 8.1c0 2-3 1.6-6.4 2.6"/>',
   };
   const ico = (k) => `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${I[k]}</svg>`;
@@ -530,7 +724,7 @@
 
   const rowHtml = (i) => `
     <div class="row ${i.status === "done" ? "done" : ""} ${+S.arg === i.id ? "on" : ""}" role="button" tabindex="0" data-issue="${i.id}">
-      ${priIcon(i.pri)}<span class="mono dim id">FTC-${i.id}</span>${statusIcon(i.status)}
+      ${priIcon(i.pri)}<span class="mono dim id">${ftc(i.id)}</span>${statusIcon(i.status)}
       <span class="t">${esc(i.title)}</span>
       <span class="chip sub">${F.subs[i.sub]}</span>
       <span class="pr-col">${i.branch ? `<span class="chip mono" title="Branch ${esc(i.branch)}">${i.pr ? "PR #" + i.pr : esc(i.branch.split("/")[0])}</span>` : ""}${dueChip(i)}</span>
@@ -540,7 +734,7 @@
   const cardHtml = (i) => `
     <button class="card ${+S.arg === i.id ? "on" : ""}" draggable="true" data-issue="${i.id}" data-drag="${i.id}">
       <div class="t">${esc(i.title)}</div>
-      <div class="m"><span class="mono">FTC-${i.id}</span><span class="chip">${F.subs[i.sub]}</span>${avs(i.who)}</div>
+      <div class="m"><span class="mono">${ftc(i.id)}</span><span class="chip">${F.subs[i.sub]}</span>${avs(i.who)}</div>
     </button>`;
 
   const panelHtml = () => {
@@ -549,10 +743,10 @@
     const sel = (field, opts, cur) => `<select data-field="${field}" data-id="${i.id}" aria-label="${field}">${opts.map(([k, l]) => `<option value="${k}" ${k === cur ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
     const act = [{ who: i.who[0], text: "created this issue", date: i.created }, ...(i.notes || [])];
     return `
-      <aside class="panel" aria-label="Issue FTC-${i.id}">
+      <aside class="panel" aria-label="Issue ${ftc(i.id)}">
         <button class="close" data-act="close-issue" aria-label="Close panel">Close</button>
-        <div class="mono dim">FTC-${i.id}</div>
-        <h2>${esc(i.title)}</h2>
+        <div class="mono dim">${ftc(i.id)}</div>
+        <textarea class="title-in" rows="${Math.max(1, Math.ceil(i.title.length / 34))}" data-title="${i.id}" maxlength="200" aria-label="Title">${esc(i.title)}</textarea>
         <div class="props">
           <span>Status</span>${sel("status", Object.entries(F.status), i.status)}
           <span>Priority</span>${sel("pri", Object.entries(F.pri), i.pri)}
@@ -575,6 +769,7 @@
   };
   const PR_LABEL = { draft: "Draft", open: "Open", merged: "Merged", closed: "Closed" };
   const gitBlock = (i) => {
+    if (i.id < 0) return `<p class="dim">This issue gets its number and branch name when it syncs.</p>`;
     if (i.branch || i.pr) {
       const st = prState(i), url = prUrl(i);
       const pr = i.pr ? (url ? `<a class="chip" href="${esc(url)}" target="_blank" rel="noopener">PR #${i.pr}</a>` : `<span class="chip">PR #${i.pr}</span>`) : "";
@@ -634,11 +829,12 @@
     const attention = `<div class="blk"><h3>Needs attention</h3>${attnItems.join("") || '<p class="hint">Nothing is blocked or overdue.</p>'}</div>`;
     const myList = role === "programmer" ? mine().filter((i) => i.type === "code") : mine();
     const myBlk = `<div class="blk"><h3>${role === "programmer" ? "My code issues" : "Assigned to me"}<button data-view-go="mine">View all</button></h3>${myList.map((i) => liIssue(i, dueChip(i))).join("") || '<p class="hint">Nothing assigned.</p>'}</div>`;
-    const last = F.practice[F.practice.length - 1];
+    const fullRuns = scoredRuns(F.practice).filter(isFullMatch), last = fullRuns[fullRuns.length - 1];
+    const trend = fullRuns.map((x) => x.score.total);
     const practiceBlk = `<div class="blk"><h3>Practice<button data-go="practice">Open</button></h3>${last
-      ? `<div style="display:flex;align-items:baseline;gap:10px;padding:10px 0 4px"><span class="big">${last.auto}/10</span><span class="dim">auto success, ${F.fmt(last.date)}</span></div>
-        <div class="chart">${chart(F.practice.map((p) => p.auto), { min: 0, max: 10, h: 64, labels: false })}</div>`
-      : '<p class="hint">No sessions logged yet.</p>'}</div>`;
+      ? `<div style="display:flex;align-items:baseline;gap:10px;padding:10px 0 4px"><span class="big">${last.score.total}</span><span class="dim">points, ${countOf(last.score.tips, "hive tip")}, ${F.fmt(last.run.date)}</span></div>
+        ${trend.length > 1 ? `<div class="chart">${chart(trend, { min: 0, max: niceMax(trend), h: 64, labels: false })}</div>` : ""}`
+      : '<p class="hint">No runs logged yet.</p>'}</div>`;
     const partsNeeded = F.parts.filter((p) => p.have < p.need);
     const partsBlk = `<div class="blk"><h3>Parts we still need<button data-go="parts">Open</button></h3>${partsNeeded.map((p) => `<button class="li" data-go="parts"><span class="t">${esc(p.name)}</span><span class="r">${p.have} of ${p.need}${p.ordered ? " · " + p.ordered + " ordered" : ""}</span></button>`).join("") || '<p class="hint">Nothing missing.</p>'}</div>`;
     const openPrs = F.issues.filter((i) => prState(i) === "open" || prState(i) === "draft");
@@ -669,7 +865,7 @@
     const pts = vals.map((v, k) => `${x(k).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
     const grid = labels ? [min, (min + max) / 2, max].map((g) => `<line class="grid" x1="${pl}" x2="${w - pr}" y1="${y(g)}" y2="${y(g)}"/><text class="lab" x="${pl - 6}" y="${y(g) + 4}" text-anchor="end">${Math.round(g)}</text>`).join("") : "";
     const xl = labels ? dates.map((d, k) => k % 2 === 0 || n < 5 ? `<text class="lab" x="${x(k)}" y="${h - 4}" text-anchor="middle">${F.fmt(d)}</text>` : "").join("") : "";
-    return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Trend, latest ${vals[n - 1]}">${grid}${xl}<polyline class="ln" pathLength="1" points="${pts}"/>${vals.map((v, k) => `<circle class="pt ${k === n - 1 ? "last" : ""}" cx="${x(k)}" cy="${y(v)}" r="3.5"/>`).join("")}</svg>`;
+    return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Trend, latest ${vals[n - 1]}">${grid}${xl}<polyline class="ln" pathLength="1" points="${pts}"/>${vals.map((v, k) => `<circle class="pt ${k === n - 1 ? "last" : ""}" cx="${x(k)}" cy="${y(v)}" r="3.5"><title>${dates[k] ? F.fmt(dates[k]) + ": " : ""}${v}</title></circle>`).join("")}</svg>`;
   }
 
   const addDays = (s, n) => { const d = F.parse(s); d.setDate(d.getDate() + n); return F.iso(d); };
@@ -711,15 +907,22 @@
     const e = F.notebook.find((x) => x.id === S.nbSel) || entries[0];
     const needs = debt().filter((i) => !F.notebook.some((n) => n.issue === i.id));
     const list = `
-      ${needs.length ? `<div class="gh"><b>Needs an entry</b><span>${needs.length}</span></div>${needs.map((i) => `<div class="pi"><b>${esc(i.title)}</b><small>FTC-${i.id} · done</small><div style="margin-top:6px"><button class="btn" data-draft="${i.id}">Draft entry</button></div></div>`).join("")}` : ""}
+      ${needs.length ? `<div class="gh"><b>Needs an entry</b><span>${needs.length}</span></div>${needs.map((i) => `<div class="pi"><b>${esc(i.title)}</b><small>${ftc(i.id)} · done</small><div style="margin-top:6px"><button class="btn" data-draft="${i.id}">Draft entry</button></div></div>`).join("")}` : ""}
       <div class="gh"><b>Entries</b><span>${entries.length}</span></div>
       ${entries.map((n) => `<button class="pi ${e && e.id === n.id ? "on" : ""}" data-nb="${n.id}"><b>${esc(n.title)}</b><small>${F.fmt(n.date)} · ${esc(F.person(n.author).name)} ${n.status === "draft" ? '<span class="tag draft">Draft</span>' : ""}</small></button>`).join("")}`;
-    const f = (k, label, rows = 3) => `<div class="fld"><label for="nb-${k}">${label}</label><textarea class="in" id="nb-${k}" rows="${rows}" data-nbf="${k}" data-nbid="${esc(e.id)}" ${MENTION_ATTRS}>${esc(e[k])}</textarea></div>`;
+    const locked = e && e.status === "final";
+    const f = (k, label, rows = 3) => `<div class="fld"><label for="nb-${k}">${label}</label><textarea class="in" id="nb-${k}" rows="${rows}" data-nbf="${k}" data-nbid="${esc(e.id)}" ${locked ? "disabled" : ""} ${MENTION_ATTRS}>${esc(e[k])}</textarea></div>`;
+    const NOTEBOOK_EVENT = { logged: "Logged", reopened: "Reopened", edited: "Changed after logging" };
+    const trail = e ? (e.log || []).map((x) => `${NOTEBOOK_EVENT[x.what]} ${F.fmt(x.date)} by ${esc(F.person(x.who).name)}`).join(" · ") : "";
+    const heading = !e ? "" : locked
+      ? `<div class="mono dim">${e.issue ? ftc(e.issue) : "No linked issue"} · ${F.fmt(e.date)} · ${esc(F.person(e.author).name)}</div><h2>${esc(e.title)}</h2>`
+      : `<div class="mono dim">${e.issue ? ftc(e.issue) : "No linked issue"} · ${esc(F.person(e.author).name)} <span class="tag draft">Draft</span></div>
+        <div class="nb-head"><input class="in" data-nbf="title" data-nbid="${esc(e.id)}" value="${esc(e.title)}" maxlength="200" required aria-label="Title"><input class="in" type="date" data-nbf="date" data-nbid="${esc(e.id)}" value="${e.date}" required aria-label="Date of the work"></div>`;
     const editor = e ? `
-      <div class="mono dim">${e.issue ? "FTC-" + e.issue : "No linked issue"} · ${F.fmt(e.date)} · ${esc(F.person(e.author).name)}</div>
-      <h2>${esc(e.title)} ${e.status === "draft" ? '<span class="tag draft">Draft</span>' : ""}</h2>
+      ${heading}
       ${f("problem", "Problem")}${f("tried", "What we tried", 4)}${f("result", "Result")}${f("next", "Next step", 2)}
-      <div style="margin-top:20px;display:flex;gap:8px;align-items:center">${e.status === "draft" ? `<button class="btn pri" data-finalize="${esc(e.id)}">Mark as logged</button>` : `<span class="dim">Logged. Judges will see this in the notebook.</span>`}<button class="btn ghost" data-rm="notebook:${esc(e.id)}">Delete</button></div>`
+      <div style="margin-top:20px;display:flex;gap:8px;align-items:center">${locked ? `<span class="dim">Logged, so this entry is locked.</span><button class="btn" data-reopen="${esc(e.id)}">Reopen to edit</button>` : `<button class="btn pri" data-finalize="${esc(e.id)}">Mark as logged</button>`}<button class="btn ghost" data-rm="notebook:${esc(e.id)}">Delete</button></div>
+      ${trail ? `<p class="faint" style="margin-top:10px">${trail}</p>` : ""}`
       : `<div class="empty"><b>No entries yet</b>Finish an issue and draft one here, or start a blank entry.</div>`;
     return `<div class="ph"><h1>Engineering notebook</h1><div class="r"><button class="btn" data-act="new-entry">New entry</button></div></div><div class="pane2"><div class="pl">${list}</div><div class="pr">${editor}</div></div>`;
   };
@@ -729,7 +932,7 @@
     const pct = F.budget ? Math.min(100, (spent / F.budget) * 100) : 0;
     const num = (p, k) => `<input class="in num-in" type="number" min="0" data-pf="${k}" data-pid="${esc(p.id)}" value="${p[k]}" aria-label="${esc(p.name)} ${k}">`;
     return `
-      <div class="ph"><h1>Parts</h1></div>
+      <div class="ph"><h1>Parts</h1><div class="r"><button class="btn" data-act="import" data-kind="parts">Import CSV</button></div></div>
       <div class="wrap">
         <div class="hero"><h1>$${spent.toFixed(0)}${F.budget ? ` of $${F.budget.toLocaleString()}` : ""}</h1><p>Counts everything we own or have ordered.${F.budget ? "" : (isAdmin() ? " Set a budget in Settings to track it." : "")}</p>
           ${F.budget ? `<div class="bar ${spent > F.budget ? "over" : ""}" style="margin-top:14px"><i style="width:${pct}%"></i></div>` : ""}</div>
@@ -752,31 +955,185 @@
       </div>`;
   };
 
+  /* ---------- practice runs ---------- */
+  const scoredRuns = (runs) => runs.map((run) => ({ run, score: Scoring.tally(run) })).filter((x) => x.score);
+  const mean = (values) => (values.length ? values.reduce((sum, v) => sum + v, 0) / values.length : null);
+  const oneDecimal = (v) => (v === null ? "–" : String(Math.round(v * 10) / 10));
+  const share = (hits, total) => (total ? Math.round((hits / total) * 100) + "%" : "–");
+  const driversOf = (run) => (run.drivers || []).map((id) => F.person(id).name).join(", ");
+  const isFullMatch = ({ run }) => run.kind !== "auto";
+
+  function runSummary(runs) {
+    const scored = scoredRuns(runs), full = scored.filter(isFullMatch);
+    const sheet = Scoring.SHEETS[Scoring.CURRENT];
+    return {
+      runs: scored.length, full: full.length,
+      points: mean(full.map((x) => x.score.total)),
+      auto: mean(scored.map((x) => x.score.auto)),
+      tips: mean(full.map((x) => x.score.tips)),
+      problems: runs.filter((run) => run.fail).length,
+      targets: sheet.rankingPoints.filter((rp) => rp.measure === "count").map((rp) => ({
+        label: `${rp.target}+ ${rp.unit}`, hits: full.filter((x) => x.score.rankingPoints.find((r) => r.key === rp.key).hit).length,
+      })),
+    };
+  }
+  const RECENT_RUNS = 10;
+  function runTiles(runs) {
+    const recent = runSummary(runs.slice(-RECENT_RUNS));
+    const tile = (label, value, detail = "") => `<div class="stat"><small>${label}</small><b>${value}</b>${detail ? `<span>${detail}</span>` : ""}</div>`;
+    return `<div class="stats">
+      ${tile("Average points", oneDecimal(recent.points), `last ${countOf(recent.full, "full run")}`)}
+      ${tile("Average auto", oneDecimal(recent.auto), "points")}
+      ${tile("Hive tips per run", oneDecimal(recent.tips))}
+      ${recent.targets.map((t) => tile(`Reached ${t.label}`, share(t.hits, recent.full), `${t.hits} of ${recent.full} runs`)).join("")}
+    </div>`;
+  }
+  function compareTable(title, groups) {
+    const rows = [...groups].map(([name, runs]) => [name, runSummary(runs)]).sort((a, b) => (b[1].points ?? -1) - (a[1].points ?? -1));
+    if (rows.length < 2) return "";
+    const targets = rows[0][1].targets;
+    return `<div class="blk"><h3>${title}</h3><div class="tbl"><table>
+      <thead><tr><th>${title.replace("By ", "").replace(/^./, (c) => c.toUpperCase())}</th><th class="num">Runs</th><th class="num">Auto</th><th class="num">Points</th><th class="num">Tips</th>${targets.map((t) => `<th class="num">${t.label}</th>`).join("")}<th class="num">Problems</th></tr></thead>
+      <tbody>${rows.map(([name, x]) => `<tr><td>${esc(name)}</td><td class="num">${x.runs}</td><td class="num">${oneDecimal(x.auto)}</td><td class="num">${oneDecimal(x.points)}</td><td class="num">${oneDecimal(x.tips)}</td>${x.targets.map((t) => `<td class="num">${share(t.hits, x.full)}</td>`).join("")}<td class="num">${x.problems}</td></tr>`).join("")}</tbody>
+    </table></div></div>`;
+  }
+  function groupRuns(runs, keysOf) {
+    const groups = new Map();
+    for (const run of runs) for (const key of keysOf(run)) groups.set(key, [...(groups.get(key) || []), run]);
+    return groups;
+  }
+  function problemChips(runs) {
+    const counts = groupRuns(runs, (run) => (run.fail ? [run.fail] : []));
+    if (!counts.size) return "";
+    return `<div class="blk"><h3>What went wrong</h3><div class="chips">${[...counts].sort((a, b) => b[1].length - a[1].length).map(([key, list]) => `<span class="chip">${esc(Scoring.FAILS[key].label)} · ${list.length}</span>`).join("")}</div></div>`;
+  }
+  const niceMax = (values) => Math.max(10, Math.ceil(Math.max(...values) / 10) * 10);
+  function runCharts(runs) {
+    const full = scoredRuns(runs).filter(isFullMatch);
+    if (full.length < 2) return "";
+    const dates = full.map((x) => x.run.date), points = full.map((x) => x.score.total), tips = full.map((x) => x.score.tips);
+    return `<div class="charts">
+      <div class="chart"><div class="dim" style="margin-bottom:8px">Points per run</div>${chart(points, { min: 0, max: niceMax(points), dates })}</div>
+      <div class="chart"><div class="dim" style="margin-bottom:8px">Hive tips per run</div>${chart(tips, { min: 0, max: Math.max(8, Math.max(...tips) + 1), dates })}</div>
+    </div>`;
+  }
+  function runRow(run) {
+    const score = Scoring.tally(run);
+    const problem = run.fail ? Scoring.FAILS[run.fail].label : "";
+    const link = run.issue
+      ? `<button class="chip mono" data-issue-go="${run.issue}">${ftc(run.issue)}</button>`
+      : run.fail || run.note ? `<button class="btn" data-run-issue="${esc(run.id)}">Make issue</button>` : "";
+    return `<tr class="run" data-session="${esc(run.id)}" data-run-edit="${esc(run.id)}" tabindex="0">
+      <td>${F.fmt(run.date)}</td><td class="dim">${esc(Scoring.KINDS[run.kind] || "Run")}</td><td>${esc(driversOf(run))}</td><td class="dim">${esc(run.routine || "")}</td>
+      <td class="num">${score ? score.auto : `${run.auto ?? "–"}/10`}</td><td class="num">${score ? score.total : "–"}</td><td class="num">${score ? score.tips : "–"}</td>
+      <td class="dim">${esc([problem, run.note].filter(Boolean).join(". "))}</td>
+      <td class="nowrap">${link}</td><td><button class="rm" data-rm="practice:${esc(run.id)}" aria-label="Remove run">Remove</button></td></tr>`;
+  }
+
   views.practice = () => {
-    const p = F.practice;
-    const last = p[p.length - 1];
+    const all = F.practice;
+    const runs = all.filter((run) => (!S.runRoutine || run.routine === S.runRoutine) && (!S.runDriver || (run.drivers || []).includes(S.runDriver)));
+    const routines = [...new Set(all.map((run) => run.routine).filter(Boolean))];
+    const drivers = [...new Set(all.flatMap((run) => run.drivers || []))];
+    const pick = (key, allLabel, options) => `<label class="sr" for="${key}">${allLabel}</label><select class="pillsel" id="${key}" data-run-filter="${key}"><option value="">${allLabel}</option>${options.map(([value, label]) => `<option value="${esc(value)}" ${S[key] === value ? "selected" : ""}>${esc(label)}</option>`).join("")}</select>`;
+    const sheet = Scoring.SHEETS[Scoring.CURRENT];
     return `
-      <div class="ph"><h1>Practice</h1></div>
+      <div class="ph"><h1>Practice</h1>
+        <div class="r">${all.length ? pick("runRoutine", "All routines", routines.map((r) => [r, r])) + pick("runDriver", "All drivers", drivers.map((d) => [d, F.person(d).name])) : ""}<button class="btn pri" data-act="new-run">Log a run</button></div>
+      </div>
       <div class="wrap">
-        ${last ? `<div class="charts">
-          <div class="chart"><div class="dim">Auto success, out of 10</div><div class="big" style="margin:2px 0 8px">${last.auto}/10</div>${chart(p.map((x) => x.auto), { min: 0, max: 10, dates: p.map((x) => x.date) })}</div>
-          <div class="chart"><div class="dim">Average cycle time, seconds</div><div class="big" style="margin:2px 0 8px">${last.cycle} s</div>${chart(p.map((x) => x.cycle), { min: Math.max(0, Math.floor(Math.min(...p.map((x) => x.cycle)) / 5) * 5 - 5), max: Math.ceil(Math.max(...p.map((x) => x.cycle)) / 5) * 5 + 5, dates: p.map((x) => x.date) })}</div>
-        </div>` : ""}
-        <div class="blk" data-write><h3>Log a session</h3>
-          <form class="form" data-prac>
-            <input class="in" type="date" name="date" value="${F.today}" aria-label="Date">
-            <select class="in" name="driver" aria-label="Driver">${F.people.map((x) => `<option value="${esc(x.id)}" ${x.id === F.me ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>
-            <input class="in" type="number" name="auto" min="0" max="10" placeholder="Auto /10" required aria-label="Auto successes out of 10">
-            <input class="in" type="number" name="cycle" min="1" max="600" step="0.1" placeholder="Cycle s" required aria-label="Cycle time in seconds">
-            <input class="in" name="note" placeholder="What happened?" aria-label="Notes">
-            <button class="btn pri">Log</button>
-          </form></div>
-        ${p.length ? `<table>
-          <thead><tr><th>Date</th><th>Driver</th><th class="num">Auto</th><th class="num">Cycle</th><th>Notes</th><th></th></tr></thead>
-          <tbody>${p.slice().reverse().map((x) => `<tr data-session="${esc(x.id)}"><td>${F.fmt(x.date)}</td><td>${esc(F.person(x.driver).name)}</td><td class="num">${x.auto}/10</td><td class="num">${x.cycle} s</td><td class="dim">${esc(x.note)}</td><td><button class="rm" data-rm="practice:${esc(x.id)}" aria-label="Remove session">Remove</button></td></tr>`).join("")}</tbody>
-        </table>` : `<div class="empty"><b>No sessions yet</b>Log your first practice run above.</div>`}
+        ${all.length ? `${scoredRuns(runs).length ? runTiles(runs) : ""}${runCharts(runs)}
+          <div class="cols"><div>${compareTable("By routine", groupRuns(runs, (run) => (run.routine ? [run.routine] : [])))}</div><div>${compareTable("By driver", groupRuns(runs, (run) => (run.drivers || []).map((id) => F.person(id).name)))}</div></div>
+          ${problemChips(runs)}
+          <div class="tbl"><table>
+            <thead><tr><th>Date</th><th>Type</th><th>Drivers</th><th>Routine</th><th class="num">Auto</th><th class="num">Points</th><th class="num">Tips</th><th>What happened</th><th></th><th></th></tr></thead>
+            <tbody>${runs.slice().reverse().map(runRow).join("")}</tbody>
+          </table></div>` : `<div class="empty"><b>No runs yet</b>Log a run to score it on the ${esc(sheet.name)} sheet.</div>`}
       </div>`;
   };
+
+  function stepper(item, value, phase) {
+    return `<div class="step" ${phase ? `data-phase="${phase}"` : ""}>
+      <div><b>${esc(item.label)}</b><small>${esc(item.hint)}</small></div>
+      <button type="button" class="btn" data-step="-1" aria-label="${esc(item.label)}, one less">${ico("minus")}</button>
+      <input class="in" type="number" inputmode="numeric" min="0" max="${item.max}" name="c:${item.key}" value="${value || 0}" data-run aria-label="${esc(item.label)}${item.hint ? ", " + esc(item.hint) : ""}">
+      <button type="button" class="btn" data-step="1" aria-label="${esc(item.label)}, one more">${ico("plus")}</button>
+    </div>`;
+  }
+  function runModal(run) {
+    const last = F.practice[F.practice.length - 1];
+    const d = run || { date: F.today, kind: "full", drivers: [F.me], routine: last ? last.routine : "", version: last ? last.version : "", counts: {} };
+    const sheet = Scoring.SHEETS[d.sheet] || Scoring.SHEETS[Scoring.CURRENT];
+    const counts = d.counts || {};
+    const steppers = (phase) => sheet.items.filter((item) => item.phase === phase).map((item) => stepper(item, counts[item.key], phase)).join("");
+    const routines = [...new Set(F.practice.map((x) => x.routine).filter(Boolean))];
+    showModal(`<form data-runform data-kind="${esc(d.kind)}" data-id="${esc(run ? run.id : "")}" data-sheet="${esc(d.sheet || Scoring.CURRENT)}">
+      <div class="hd">${run ? "Edit run" : "Log a run"}</div>
+      <div class="bd run-bd">
+        <div class="fl run-top">
+          <div><label for="rn-k">Type</label><select class="in" id="rn-k" name="kind">${Object.entries(Scoring.KINDS).map(([k, v]) => `<option value="${k}" ${k === d.kind ? "selected" : ""}>${v}</option>`).join("")}</select></div>
+          <div><label for="rn-d">Date</label><input class="in" id="rn-d" type="date" name="date" value="${esc(d.date)}" required></div>
+          <div><label for="rn-r">Auto routine</label><input class="in" id="rn-r" name="routine" value="${esc(d.routine)}" list="rn-routines" maxlength="80" autocomplete="off" placeholder="Close side, 3 tips"><datalist id="rn-routines">${routines.map((r) => `<option value="${esc(r)}"></option>`).join("")}</datalist></div>
+          <div><label for="rn-v">Code version</label><input class="in mono" id="rn-v" name="version" value="${esc(d.version)}" maxlength="80" autocomplete="off" spellcheck="false" placeholder="Commit or tag"></div>
+          <div class="run-event"><label for="rn-w">Event or match</label><input class="in" id="rn-w" name="where" value="${esc(d.where)}" maxlength="80" autocomplete="off" placeholder="Qual 12"></div>
+          <div class="run-event"><label for="rn-res">Result</label><select class="in" id="rn-res" name="result">${[["", "Not recorded"], ["win", "Win"], ["tie", "Tie"], ["loss", "Loss"]].map(([k, v]) => `<option value="${k}" ${k === (d.result || "") ? "selected" : ""}>${v}</option>`).join("")}</select></div>
+        </div>
+        <div class="run-label">Drivers</div>
+        <div class="chips">${F.people.map((p) => `<label class="chip pick"><input class="sr" type="checkbox" name="driver" value="${esc(p.id)}" ${(d.drivers || []).includes(p.id) ? "checked" : ""}>${esc(p.name)}</label>`).join("")}</div>
+        <div class="run-label">Auto</div>${steppers("auto")}
+        <div class="run-tele"><div class="run-label">TeleOp and end of match</div>${steppers("teleop")}</div>
+        <div class="run-label">Fouls</div>${sheet.fouls.map((foul) => stepper(foul, counts[foul.key])).join("")}
+        <div class="run-label">What happened</div>
+        <div class="fl run-top">
+          <div><label for="rn-f">Main problem</label><select class="in" id="rn-f" name="fail"><option value="">None</option>${Object.entries(Scoring.FAILS).map(([k, v]) => `<option value="${k}" ${k === d.fail ? "selected" : ""}>${esc(v.label)}</option>`).join("")}</select></div>
+          <div><label for="rn-c">Cycle time, seconds</label><input class="in" id="rn-c" type="number" name="cycle" min="1" max="600" step="0.1" value="${d.cycle ?? ""}"></div>
+        </div>
+        <input class="in" name="note" value="${esc(d.note)}" maxlength="1000" placeholder="Notes" aria-label="Notes" style="margin-top:10px" autocomplete="off">
+      </div>
+      <div class="run-total" id="run-total" aria-live="polite"></div>
+      ${footer(run ? "Save run" : "Log run")}
+    </form>`);
+    paintRunTotal();
+  }
+  function runFromForm(form) {
+    const data = new FormData(form), kind = data.get("kind"), sheet = form.dataset.sheet;
+    const autoOnly = kind === "auto";
+    const onSheet = Scoring.SHEETS[sheet];
+    const kept = [...onSheet.items.filter((item) => !autoOnly || item.phase === "auto"), ...onSheet.fouls];
+    const counts = {};
+    for (const item of kept) { const n = Math.round(+data.get("c:" + item.key) || 0); if (n > 0) counts[item.key] = n; }
+    const cycle = +data.get("cycle");
+    return {
+      date: data.get("date"), kind, sheet, counts, drivers: data.getAll("driver"),
+      routine: data.get("routine").trim(), version: data.get("version").trim(),
+      where: Scoring.hasResult(kind) ? data.get("where").trim() : "", result: Scoring.hasResult(kind) ? data.get("result") : "",
+      fail: data.get("fail"), cycle: cycle || undefined, note: data.get("note").trim(),
+    };
+  }
+  function paintRunTotal() {
+    const box = $("#run-total"), form = $("[data-runform]");
+    if (!box || !form) return;
+    const score = Scoring.tally(runFromForm(form));
+    const chip = (rp) => `<span class="chip ${rp.hit ? "rp-hit" : ""}" title="${esc(rp.note || "")}">${rp.hit ? ico("check") : ""}${esc(rp.label)} ${rp.value}/${rp.target}</span>`;
+    box.innerHTML = `<div><b>${score.total}</b> points<span class="dim"> · ${score.auto} auto · ${score.teleop} TeleOp${score.given ? ` · ${score.given} given away` : ""}</span></div><div class="chips">${score.rankingPoints.map(chip).join("")}</div>${score.rankingPoints.filter((rp) => rp.note && !rp.hit).map((rp) => `<p class="run-note">${esc(rp.label)}: ${esc(rp.note)}</p>`).join("")}`;
+  }
+  function stepRunCount(button) {
+    const input = button.parentElement.querySelector("input");
+    const next = (+input.value || 0) + +button.dataset.step;
+    input.value = Math.min(+input.max, Math.max(0, next));
+    paintRunTotal();
+  }
+  async function issueFromRun(run) {
+    const problem = run.fail ? Scoring.FAILS[run.fail] : null;
+    const title = `${problem ? problem.label : "Practice problem"}${run.routine ? ` in ${run.routine}` : ""}`;
+    const facts = [`From a ${(Scoring.KINDS[run.kind] || "run").toLowerCase()} on ${F.fmt(run.date)}.`, run.drivers && run.drivers.length ? `Drivers: ${driversOf(run)}.` : "", run.version ? `Code: ${run.version}.` : "", run.note || ""];
+    const sub = problem ? problem.sub : "team";
+    const issue = await create("issues", { title, type: typeFor(sub), sub, pri: "med", status: "todo", who: [F.me], created: F.today, desc: facts.filter(Boolean).join(" ") });
+    run.issue = issue.id;
+    await persist("practice", run);
+    toast(`Created ${ftc(issue.id)}.`, "Open", () => openIssue(issue.id));
+    render();
+  }
 
   views.meetings = () => {
     const m = F.meetings.find((x) => x.id === S.mtSel) || F.meetings[0];
@@ -792,7 +1149,7 @@
         <div class="sec"><h3>Notes</h3><textarea class="in" rows="6" data-mtnotes="${esc(m.id)}" placeholder="What was decided? Type @ to mention someone" aria-label="Notes" ${MENTION_ATTRS}>${esc(m.notes)}</textarea></div>
         <div class="sec"><h3>Action items</h3>
           ${m.actions.map((a) => `<div class="li">${av(a.who)}<span class="t">${esc(a.text)}</span>${a.issue
-            ? `<button class="chip mono" data-issue-go="${a.issue}">FTC-${a.issue}</button>`
+            ? `<button class="chip mono" data-issue-go="${a.issue}">${ftc(a.issue)}</button>`
             : `<button class="btn" data-mkissue="${esc(m.id)}:${esc(a.id)}">Make issue</button>`}<button class="rm" data-action-rm="${esc(m.id)}:${esc(a.id)}" aria-label="Remove action item">Remove</button></div>`).join("") || '<p class="hint">No action items.</p>'}
           <form class="formrow" data-action="${esc(m.id)}"><input class="in" name="t" placeholder="Add an action item" autocomplete="off" aria-label="Action item" required>
             <select class="in" name="who" style="max-width:130px" aria-label="Owner">${F.people.map((p) => `<option value="${esc(p.id)}" ${p.id === F.me ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select><button class="btn">Add</button></form>
@@ -863,6 +1220,12 @@
       </div><h3 class="sh">Season</h3><div class="box">
         ${row("Qualifier date", q ? `The countdown on Home and the pit board uses this. Currently ${F.days(q.date)} days away.` : "Starts the countdown on Home and the pit board.", field("qual", q ? q.date : "", "Qualifier date", "date", !admin))}
         ${row("Parts budget", "Dollars. Leave at 0 to hide the budget bar.", field("budget", F.budget, "Parts budget", "number", !admin, 'min="0" step="10"'))}
+      </div><h3 class="sh">Import</h3><div class="box">
+        ${row("From a spreadsheet", "Bring in lists from Excel as CSV, or paste the cells. Anything already here is left out.", canWrite() ? `<div class="avl"><button class="btn" data-act="import" data-kind="parts">Parts</button><button class="btn" data-act="import" data-kind="issues">Issues</button></div>` : "")}
+      </div><h3 class="sh">Offline</h3><div class="box">
+        ${row("Working without a connection", window.isSecureContext && "serviceWorker" in navigator
+          ? "This device keeps a copy of the team's data and the app. Changes wait here and sync when the server is back."
+          : "An open tab keeps working and syncs later, but this address isn't HTTPS, so the app can't reopen without a connection. See the HTTPS section of DEPLOYMENT.md.", "")}
       </div><h3 class="sh">Backup</h3><div class="box">
         ${row("Download everything", "A JSON copy of all issues, notes and settings. Passwords are not included.", admin ? `<a class="btn" href="/api/export" download>Download backup</a>` : `<span class="faint">Admins only</span>`)}
       </div>`;
@@ -929,6 +1292,7 @@
     $("#page").innerHTML = `<div class="authwrap">${html}</div>`;
     $("#ov-modal").classList.remove("show", "leaving");
     motion.page = undefined;
+    paintNet();
     reveal($$(".authbox > *"), { step: 40, y: 8 });
     const f = $("#page input"); if (f) f.focus();
   }
@@ -977,32 +1341,62 @@
   }
   const authError = (m) => { const e = $("#auth-err"); if (e) e.textContent = m; shake($(".authbox")); };
 
+  function stopChecking() {
+    net.offline = false;
+    clearInterval(net.checkTimer);
+  }
   function sessionEnded() {
     S.ready = false;
+    stopChecking();
+    Offline.clearState(device);
     call("GET", "/api/session").then((s) => { S.session = s; showLogin("Your session ended. Sign in again."); }).catch(() => showLogin("Your session ended. Sign in again."));
   }
 
   async function enter(user) {
     S.user = user;
     if (user.mustChange) return showPasswordGate();
-    applyState(await call("GET", "/api/state"));
+    queue = Offline.queue(device, user.id);
+    let state;
+    try { state = await call("GET", "/api/state"); } catch (e) { if (e.net && enterFromSavedCopy()) return; throw e; }
+    adopt(state);
     S.ready = true;
     S.view = S.role === "captain" ? "open" : "mine";
     $("#app").className = "app";
     connectEvents();
     render();
+    syncQueue();
+  }
+  function enterFromSavedCopy() {
+    const saved = Offline.loadState(device);
+    if (!saved) return false;
+    S.user = saved.state.me;
+    S.session = { team: saved.state.team, user: saved.state.me };
+    queue = Offline.queue(device, saved.state.me.id);
+    net.asOf = saved.at;
+    applyState(withQueuedChanges(saved.state));
+    S.ready = true;
+    S.view = S.role === "captain" ? "open" : "mine";
+    $("#app").className = "app";
+    markOffline();
+    render();
+    return true;
+  }
+  function keepAppFilesOnDevice() {
+    if (window.isSecureContext && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
   }
 
   async function boot() {
     loadUi();
     try { const a = localStorage.getItem("008-accent"); if (a) applyAccent(a); } catch (e) { /* ignore */ }
     parseHash();
+    keepAppFilesOnDevice();
     try {
-      S.session = await call("GET", "/api/session");
+      S.session = await call("GET", "/api/session", undefined, giveUpAfter(STARTUP_TIMEOUT_MS));
       if (S.session.needsSetup) return showSetup();
-      if (!S.session.user) return showLogin();
+      if (!S.session.user) { Offline.clearState(device); return showLogin(); }
       await enter(S.session.user);
     } catch (e) {
+      if (e.net && enterFromSavedCopy()) return;
       authScreen(`<div class="authbox"><h1>Can't reach the server</h1><p class="dim">${esc(e.message)}. Check that it's running, then reload.</p><button class="btn pri" data-act="reload">Reload</button></div>`);
     }
   }
@@ -1024,6 +1418,7 @@
     if (l) l.scrollTop = keep[0];
     if (p) p.scrollTop = keep[1];
     settle(snap, route);
+    paintNet();
     document.title = `${unread() ? `(${unread()}) ` : ""}${F.team.short || "008"} Workspace`;
   }
 
@@ -1042,7 +1437,7 @@
     if (i.status !== s) motion.bump = i.id;
     i.status = s;
     persist("issues", i);
-    if (s === "done" && !i.logged) toast(`FTC-${i.id} is done. Add it to the notebook?`, "Draft entry", () => draft(i.id));
+    if (s === "done" && !i.logged) toast(`${ftc(i.id)} is done. Add it to the notebook?`, "Draft entry", () => draft(i.id));
   }
   async function draft(id) {
     const i = byId(id);
@@ -1244,7 +1639,7 @@
   }
   function askSync() {
     const text = $("#pal-in").value.trim().replace(/\s+/g, " ");
-    if (!(S.ask && S.aiOn && palette.config.ai) || text.length < ASK_MIN_CHARS || !ASK_QUESTION.test(text)) return askCancel();
+    if (net.offline || !(S.ask && S.aiOn && palette.config.ai) || text.length < ASK_MIN_CHARS || !ASK_QUESTION.test(text)) return askCancel();
     if (palette.ask && palette.ask.text === text) return;
     askCancel();
     const hit = askCache.get(text.toLowerCase());
@@ -1308,7 +1703,7 @@
   }
 
   function chipValueHtml(slot, arg) {
-    if (slot === "issue") return `${statusIcon(byId(arg.id).status)}FTC-${arg.id}`;
+    if (slot === "issue") return `${statusIcon(byId(arg.id).status)}${ftc(arg.id)}`;
     if (slot === "person") return `${av(arg.id)}${esc(arg.label)}`;
     if (slot === "status") return `${statusIcon(arg.id)}${esc(arg.label)}`;
     if (slot === "accent") return `<span class="pal-sw" style="--c:${esc(arg.swatch)}"></span>${esc(arg.label)}`;
@@ -1548,8 +1943,13 @@
     try { localStorage.setItem("008-theme", t); } catch (e) { /* ignore */ }
   }
   async function logout() {
+    if (net.offline) { toast("You're offline. Sign out once you're back online."); render(); return; }
+    const waiting = queue ? queue.pendingCount() : 0;
+    if (waiting && !window.confirm(`${countOf(waiting, "change")} haven't synced yet. They'll go out the next time you sign in on this device. Sign out anyway?`)) { render(); return; }
     try { await call("POST", "/api/logout"); } catch (e) { /* already out */ }
     S.ready = false;
+    Offline.clearState(device);
+    queue = null;
     try { S.session = await call("GET", "/api/session"); } catch (e) { /* ignore */ }
     showLogin();
   }
@@ -1561,30 +1961,113 @@
 
   /* ---------- shared actions ---------- */
   const assign = (i, who) => { i.who = [who, ...i.who.slice(1).filter((x) => x !== who)]; persist("issues", i); };
-  async function copyText(value, message) {
-    try { await navigator.clipboard.writeText(value); } catch (err) { /* ignore */ }
-    toast(message);
+  /** navigator.clipboard only exists on HTTPS, so plain-HTTP installs go through a hidden text field. */
+  function copyThroughTextField(value) {
+    const focused = document.activeElement, field = document.createElement("textarea");
+    field.value = value;
+    field.style.cssText = "position:fixed;opacity:0";
+    document.body.append(field);
+    field.select();
+    let copied = false;
+    try { copied = document.execCommand("copy"); } catch (err) { /* not supported here */ }
+    field.remove();
+    if (focused && focused.focus) focused.focus();
+    return copied;
   }
-  const REMOVE_LABEL = { issues: "this issue", notebook: "this notebook entry", meetings: "this meeting", parts: "this part", practice: "this session", milestones: "this milestone", phases: "this phase" };
+  async function copyText(value, message) {
+    let copied = false;
+    try { await navigator.clipboard.writeText(value); copied = true; } catch (err) { copied = copyThroughTextField(value); }
+    toast(copied ? message : "Couldn't copy that here. Select it and copy it by hand.");
+  }
+  const REMOVE_LABEL = { issues: "this issue", notebook: "this notebook entry", meetings: "this meeting", parts: "this part", practice: "this run", milestones: "this milestone", phases: "this phase" };
   /** Asks first. btn, if given, shows it is working. */
   async function removeWithConfirm(coll, id, btn) {
     if (!window.confirm(`Delete ${REMOVE_LABEL[coll]}? This can't be undone.`)) return;
     const done = btn ? busy(btn) : () => {};
+    const entry = coll === "notebook" ? F.notebook.find((x) => x.id === id) : null;
     try {
       await remove(coll, id);
+      if (entry && entry.issue) matchLoggedToNotebook(entry.issue);
       if (coll === "issues") go("issues"); else render();
     } catch (err) { done(); writeFailed(err); }
   }
-  function finalizeEntry(n) {
-    if (!n) return;
-    n.status = "final"; persist("notebook", n);
-    const i = byId(n.issue); if (i) { i.logged = true; persist("issues", i); }
-    toast("Saved to the notebook."); render();
+  function matchLoggedToNotebook(issueId) {
+    const i = byId(issueId);
+    if (!i) return;
+    const logged = F.notebook.some((n) => n.issue === i.id && n.status === "final");
+    if (!!i.logged !== logged) { i.logged = logged; persist("issues", i); }
   }
+  function setEntryStatus(n, status) {
+    if (!n) return;
+    n.status = status;
+    persist("notebook", n);
+    if (n.issue) matchLoggedToNotebook(n.issue);
+  }
+  function finalizeEntry(n) { setEntryStatus(n, "final"); toast("Saved to the notebook."); render(); }
+  function reopenEntry(n) { setEntryStatus(n, "draft"); render(); }
   function openNote(n) {
     if (!n) return;
     if (!n.read) markRead([n.id]);
     if (n.link && /^https:\/\//.test(n.link)) { window.open(n.link, "_blank", "noopener"); render(); } else if (n.link) go(n.link); else render();
+  }
+
+  /* ---------- importing a spreadsheet ---------- */
+  const IMPORT_NAMES = { parts: "parts", issues: "issues" };
+  const existingTitles = (kind) => (kind === "parts" ? F.parts.map((p) => p.name) : F.issues.map((i) => i.title));
+  const importContext = (kind) => ({ subs: F.subs, people: F.people, me: F.me, today: F.today, typeFor, existing: existingTitles(kind) });
+
+  function importModal(kind) {
+    S.imp = { kind, table: null, columns: {}, cid: newClientId() };
+    showModal(`<form data-import>
+      <div class="hd">Import ${IMPORT_NAMES[kind]}</div>
+      <div class="bd">
+        <p class="dim">Choose a CSV file, or copy the cells in Excel and paste them here. In Excel, use File, Save As, CSV.</p>
+        <div class="imp-source"><label class="btn filebtn">${ico("upload")}Choose file<input type="file" accept=".csv,.tsv,.txt,text/csv" data-impfile></label>
+          <textarea class="in" name="paste" rows="2" placeholder="Or paste cells here" aria-label="Pasted cells"></textarea></div>
+        <div id="imp-body"></div>
+      </div>
+      ${footer("Import")}
+    </form>`);
+    $("[data-import] .btn.pri").disabled = true;
+  }
+  async function readImportFile(file) {
+    try { readImportText(CsvImport.decode(await file.arrayBuffer())); } catch (e) { modalErr("That file couldn't be read."); }
+  }
+  function readImportText(text) {
+    const table = CsvImport.parse(text);
+    S.imp.table = table.headers.length ? table : null;
+    S.imp.columns = table.headers.length ? CsvImport.guessColumns(S.imp.kind, table.headers) : {};
+    paintImport();
+  }
+  function paintImport() {
+    const { kind, table, columns } = S.imp, body = $("#imp-body"), importButton = $("[data-import] .btn.pri");
+    if (!table) { body.innerHTML = ""; importButton.disabled = true; return; }
+    const plan = CsvImport.prepare(kind, table, columns, importContext(kind));
+    S.imp.plan = plan;
+    const fields = CsvImport.FIELDS[kind], required = fields.find((field) => field.required);
+    const options = (field) => `<option value="">Skip</option>${table.headers.map((header, k) => `<option value="${k}" ${columns[field.key] === k ? "selected" : ""}>${esc(header || "Column " + (k + 1))}</option>`).join("")}`;
+    const preview = plan.ready.slice(0, CsvImport.PREVIEW_ROWS);
+    const cellText = (doc, field) => (field.key === "sub" ? F.subs[doc.sub] : field.key === "who" ? doc.who.map((id) => F.person(id).name).join(", ") : field.key === "status" ? F.status[doc.status] : field.key === "pri" ? F.pri[doc.pri] : doc[field.key] ?? "");
+    const notes = [
+      plan.skipped.length ? `${countOf(plan.skipped.length, "row")} left out: ${plan.skipped.slice(0, 4).map((x) => `line ${x.line}, ${x.reason}`).join("; ")}${plan.skipped.length > 4 ? "; and more" : ""}.` : "",
+      plan.notes.unknownPeople ? `${countOf(plan.notes.unknownPeople, "row")} named someone who isn't a member, so they're assigned to you.` : "",
+      plan.notes.badDates ? `${countOf(plan.notes.badDates, "date")} couldn't be read and were left blank.` : "",
+    ].filter(Boolean);
+    body.innerHTML = `
+      <div class="imp-map">${fields.map((field) => `<div><label for="imp-${field.key}">${field.label}${field.required ? " (required)" : ""}</label><select class="in" id="imp-${field.key}" data-impcol="${field.key}">${options(field)}</select></div>`).join("")}</div>
+      <p class="imp-count"><b>${countOf(plan.ready.length, "row")} ready</b>${columns[required.key] === undefined ? `. Pick the ${required.label.toLowerCase()} column.` : ""}</p>
+      ${notes.map((n) => `<p class="dim">${esc(n)}</p>`).join("")}
+      ${preview.length ? `<div class="tbl imp-preview"><table><thead><tr>${fields.map((field) => `<th>${field.label}</th>`).join("")}</tr></thead><tbody>${preview.map((doc) => `<tr>${fields.map((field) => `<td>${esc(cellText(doc, field))}</td>`).join("")}</tr>`).join("")}</tbody></table></div>` : ""}`;
+    importButton.disabled = !plan.ready.length;
+    importButton.textContent = plan.ready.length ? `Import ${countOf(plan.ready.length, "row")}` : "Import";
+  }
+  async function sendImport() {
+    const { kind, plan, cid } = S.imp;
+    const r = await write("POST", "/api/import", { coll: kind, rows: plan.ready, cid });
+    closeModal();
+    toast(`Imported ${r.created} ${IMPORT_NAMES[kind]}.`);
+    await refresh();
+    render();
   }
 
   /* ---------- context menus ---------- */
@@ -1602,8 +2085,8 @@
       w && { label: "Priority", items: choices(Object.entries(F.pri), i.pri, (k) => withIssue(id, (x) => { x.pri = k; persist("issues", x); render(); }), priIcon) },
       w && { label: "Assign to", items: choices(F.people.map((p) => [p.id, p.name]), i.who[0], (k) => withIssue(id, (x) => { assign(x, k); render(); }), av) },
       "-",
-      { label: "Copy ID", hint: "FTC-" + id, run: () => copyText("FTC-" + id, `Copied FTC-${id}.`) },
-      { label: "Copy branch name", run: () => copyText(branchName(i), "Branch name copied.") },
+      i.id > 0 && { label: "Copy ID", hint: "FTC-" + id, run: () => copyText("FTC-" + id, `Copied FTC-${id}.`) },
+      i.id > 0 && { label: "Copy branch name", run: () => copyText(branchName(i), "Branch name copied.") },
       w && i.status === "done" && !i.logged && { label: "Draft notebook entry", run: () => draft(id) },
       isAdmin() && "-",
       isAdmin() && { label: "Delete issue", danger: true, run: () => removeWithConfirm("issues", id) },
@@ -1616,7 +2099,8 @@
     return [
       { label: "Open", icon: ico("arrow"), run: () => { S.nbSel = id; render(); } },
       w && n.status === "draft" && { label: "Mark as logged", run: () => finalizeEntry(F.notebook.find((x) => x.id === id)) },
-      n.issue && { label: "Open FTC-" + n.issue, run: () => openIssue(n.issue) },
+      w && n.status === "final" && { label: "Reopen to edit", run: () => reopenEntry(F.notebook.find((x) => x.id === id)) },
+      n.issue && { label: "Open " + ftc(n.issue), run: () => openIssue(n.issue) },
       w && "-",
       w && { label: "Delete entry", danger: true, run: () => removeWithConfirm("notebook", id) },
     ];
@@ -1643,8 +2127,14 @@
     ];
   }
   function sessionMenu(id) {
-    if (!canWrite() || !F.practice.some((x) => String(x.id) === id)) return null;
-    return [{ label: "Remove session", danger: true, run: () => removeWithConfirm("practice", id) }];
+    const run = F.practice.find((x) => String(x.id) === id);
+    if (!canWrite() || !run) return null;
+    return [
+      { label: "Edit run", run: () => runModal(run) },
+      !run.issue && { label: "Make issue", run: () => issueFromRun(run).catch(writeFailed) },
+      "-",
+      { label: "Remove run", danger: true, run: () => removeWithConfirm("practice", id) },
+    ];
   }
   function noteMenu(id) {
     const n = S.inbox.find((x) => x.id === id);
@@ -1694,6 +2184,14 @@
     if ((el = q("[data-view-go]"))) { S.view = el.dataset.viewGo; S.sub = ""; go("issues"); return; }
     if ((el = q("[data-view]"))) { S.view = el.dataset.view; render(); return; }
     if ((el = q("[data-mode]"))) { S.mode = el.dataset.mode; saveUi(); render(); return; }
+    if ((el = q("[data-step]"))) { stepRunCount(el); return; }
+    if ((el = q("[data-run-issue]"))) {
+      const done = busy(el);
+      issueFromRun(F.practice.find((x) => String(x.id) === el.dataset.runIssue)).catch((err) => { done(); writeFailed(err); });
+      return;
+    }
+    if ((el = q("[data-sync-retry]"))) { queue.retry(el.dataset.syncRetry); syncQueue().then(() => { paintNet(); syncDialog(); }); return; }
+    if ((el = q("[data-sync-drop]"))) { if (window.confirm("Discard this change? It can't be brought back.")) { queue.discard(el.dataset.syncDrop); applySavedCopy(); render(); syncDialog(); } return; }
     if ((el = q("[data-issue-go]"))) { openIssue(el.dataset.issueGo); return; }
     if ((el = q("[data-issue]"))) { openIssue(el.dataset.issue); return; }
     if ((el = q("[data-draft]"))) { const done = busy(el); draft(el.dataset.draft).finally(done); return; }
@@ -1706,10 +2204,12 @@
       savePrefs(); render(); return;
     }
     if ((el = q("[data-finalize]"))) { finalizeEntry(F.notebook.find((x) => x.id === el.dataset.finalize)); return; }
+    if ((el = q("[data-reopen]"))) { reopenEntry(F.notebook.find((x) => x.id === el.dataset.reopen)); return; }
     if ((el = q("[data-nb]"))) { S.nbSel = el.dataset.nb; render(); return; }
     if ((el = q("[data-mt]"))) { S.mtSel = el.dataset.mt; render(); return; }
     if ((el = q("[data-copy]"))) { copyText(el.dataset.copy, el.dataset.copyLabel || "Branch name copied."); return; }
     if ((el = q("[data-rm]"))) { const [coll, id] = el.dataset.rm.split(":"); removeWithConfirm(coll, id, el); return; }
+    if ((el = q("[data-run-edit]")) && canWrite()) { runModal(F.practice.find((x) => String(x.id) === el.dataset.runEdit)); return; }
     if ((el = q("[data-attend]"))) {
       const [mid, pid] = el.dataset.attend.split(":");
       const m = F.meetings.find((x) => x.id === mid); if (!m) return;
@@ -1731,7 +2231,7 @@
       try {
         const i = await create("issues", { title: a.text, type: "build", sub: "team", pri: "med", status: "todo", who: [a.who], created: F.today, desc: `From the ${m.title.toLowerCase()} on ${F.fmt(m.date)}.` });
         a.issue = i.id; await persist("meetings", m);
-        toast(`Created FTC-${i.id}.`, "Open", () => openIssue(i.id)); render();
+        toast(`Created ${ftc(i.id)}.`, "Open", () => openIssue(i.id)); render();
       } catch (err) { done(); writeFailed(err); }
       return;
     }
@@ -1781,6 +2281,9 @@
       else if (a === "notif-settings") { S.setTab = "notifications"; go("settings"); }
       else if (a === "palette-settings") { closePalette(); S.setTab = "palette"; go("settings"); }
       else if (a === "close-issue") closeIssue();
+      else if (a === "new-run") runModal();
+      else if (a === "sync-status") syncDialog();
+      else if (a === "import") importModal(el.dataset.kind);
       else if (a === "new-entry") simpleModal("data-newentry", "New notebook entry", '<input class="in" name="title" placeholder="Title" required maxlength="200" autocomplete="off" aria-label="Title">', "Create entry");
       else if (a === "new-meeting") simpleModal("data-newmeeting", "New meeting", `<input class="in" name="title" placeholder="Title" required maxlength="200" autocomplete="off" aria-label="Title"><div class="fl"><div><label for="nm-d">Date</label><input class="in" id="nm-d" type="date" name="date" value="${F.today}" required></div></div>`, "Create meeting");
       else if (a === "new-phase") simpleModal("data-newphase", "Add phase", `<input class="in" name="name" placeholder="Name, for example Build" required maxlength="100" autocomplete="off" aria-label="Name"><div class="fl"><div><label for="np-s">Starts</label><input class="in" id="np-s" type="date" name="start" value="${F.today}" required></div><div><label for="np-e">Ends</label><input class="in" id="np-e" type="date" name="end" required></div></div>`, "Add phase");
@@ -1796,6 +2299,8 @@
   document.addEventListener("keydown", (e) => {
     if (!S.ready) return;
     if (e.key === "Enter" && e.target.matches && e.target.matches(".row")) { openIssue(e.target.dataset.issue); return; }
+    if (e.key === "Enter" && e.target.matches && e.target.matches("[data-title]")) { e.preventDefault(); e.target.blur(); return; }
+    if (e.key === "Enter" && e.target.matches && e.target.matches("tr.run") && canWrite()) { runModal(F.practice.find((x) => String(x.id) === e.target.dataset.runEdit)); return; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); return; }
     if ($("#ov-pal").classList.contains("show")) return paletteKey(e);
     if (e.key === "Escape") {
@@ -1839,7 +2344,21 @@
       else if (f === "due") { i.due = t.value || undefined; persist("issues", i); }
       else { i[f] = t.value; persist("issues", i); }
       render();
-    } else if (t.matches("[data-subf]")) { S.sub = t.value; S.arg = null; go("issues"); render(); }
+    } else if (t.matches("[data-title]")) {
+      const i = byId(t.dataset.title);
+      if (i && !i.title.trim()) i.title = base.get(i).title;
+      render();
+    } else if (t.matches("[data-nbf=title], [data-nbf=date]")) {
+      const n = F.notebook.find((x) => x.id === t.dataset.nbid);
+      if (n && !n[t.dataset.nbf].trim()) n[t.dataset.nbf] = base.get(n)[t.dataset.nbf];
+      render();
+    } else if (t.matches("[data-run-filter]")) { S[t.dataset.runFilter] = t.value; render(); }
+    else if (t.matches("[data-runform] [name=kind]")) { t.form.dataset.kind = t.value; paintRunTotal(); }
+    else if (t.matches("[data-runform] [name=driver]")) {
+      if (t.form.querySelectorAll("[name=driver]:checked").length > Scoring.MAX_DRIVERS) { t.checked = false; toast(`A drive team has at most ${Scoring.MAX_DRIVERS} drivers.`); }
+    } else if (t.matches("[data-impfile]")) { const file = t.files && t.files[0]; if (file) readImportFile(file); }
+    else if (t.matches("[data-impcol]")) { S.imp.columns[t.dataset.impcol] = t.value === "" ? undefined : +t.value; paintImport(); }
+    else if (t.matches("[data-subf]")) { S.sub = t.value; S.arg = null; go("issues"); render(); }
     else if (t.matches("[data-role]")) { S.role = t.value; S.view = S.role === "captain" ? "open" : "mine"; S.sub = ""; saveUi(); render(); }
     else if (t.matches("[data-set='role']")) { S.role = t.value; S.view = S.role === "captain" ? "open" : "mine"; saveUi(); render(); }
     else if (t.matches("[data-set='qual']")) {
@@ -1869,8 +2388,11 @@
     }
   });
 
+  const REQUIRED_NOTEBOOK_FIELDS = ["title", "date"];
   document.addEventListener("input", (e) => {
     const t = e.target;
+    if (t.matches && t.matches("[data-run]")) { paintRunTotal(); return; }
+    if (t.matches && t.matches("[data-import] [name=paste]")) { readImportText(t.value); return; }
     if (t.matches && t.matches("[data-setup] [name=aname]")) { const u = t.form.elements.username; if (!u.dataset.touched) u.value = t.value.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 32); return; }
     if (t.matches && t.matches("[data-setup] [name=username]")) { t.dataset.touched = "1"; return; }
     if (t.matches && t.matches("[data-addmember] [name=name]")) { const u = t.form.elements.username; if (!u.dataset.touched) u.value = t.value.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 32); return; }
@@ -1893,7 +2415,11 @@
       else if (k === "budget") { F.budget = Math.max(0, Number(v) || 0); soon("settings", saveSettings); }
       renderSide();
     }
-    else if (t.matches("[data-nbf]")) { const n = F.notebook.find((x) => x.id === t.dataset.nbid); if (n) { n[t.dataset.nbf] = t.value; persistSoon("notebook", n); } }
+    else if (t.matches("[data-nbf]")) {
+      const n = F.notebook.find((x) => x.id === t.dataset.nbid), field = t.dataset.nbf;
+      if (n) { n[field] = t.value; if (!REQUIRED_NOTEBOOK_FIELDS.includes(field) || t.value.trim()) persistSoon("notebook", n); }
+    }
+    else if (t.matches("[data-title]")) { const i = byId(t.dataset.title); if (i) { i.title = t.value; if (t.value.trim()) persistSoon("issues", i); } }
     else if (t.matches("[data-mtnotes]")) { const m = F.meetings.find((x) => x.id === t.dataset.mtnotes); if (m) { m.notes = t.value; persistSoon("meetings", m); } }
     else if (t.matches("[data-desc]")) { const i = byId(t.dataset.desc); if (i) { i.desc = t.value; persistSoon("issues", i); } }
     else if (t.matches("[data-blockedby]")) { const i = byId(t.dataset.blockedby); if (i) { i.blockedBy = t.value; persistSoon("issues", i); } }
@@ -1926,7 +2452,7 @@
         /* ignore */
       } else if (f.matches("[data-new]")) {
         const i = await create("issues", { title: d.title.trim(), type: typeFor(d.sub), sub: d.sub, pri: d.pri, status: "todo", who: [d.who], created: F.today, due: d.due || undefined, desc: "" });
-        closeModal(); toast(`Created FTC-${i.id}.`, "Open", () => openIssue(i.id)); render();
+        closeModal(); toast(`Created ${ftc(i.id)}.`, "Open", () => openIssue(i.id)); render();
       } else if (f.matches("[data-gh]")) {
         S.repo = d.repo.trim(); await saveSettings(); closeModal(); toast(`Saved ${S.repo}.`); render();
       } else if (f.matches("[data-ghtoken]")) {
@@ -1936,9 +2462,17 @@
       } else if (f.matches("[data-cmt]")) {
         const i = byId(f.dataset.cmt);
         if (d.t.trim()) { i.notes = [...(i.notes || []), { who: F.me, text: d.t.trim(), date: F.today }]; persist("issues", i); render(); }
-      } else if (f.matches("[data-prac]")) {
-        await create("practice", { date: d.date, driver: d.driver, auto: +d.auto, cycle: +d.cycle, note: d.note });
-        toast("Session logged."); render();
+      } else if (f.matches("[data-runform]")) {
+        const data = runFromForm(f);
+        if (f.dataset.id) {
+          const run = F.practice.find((x) => String(x.id) === f.dataset.id);
+          Object.assign(run, data);
+          await persist("practice", run);
+          F.practice.sort(SORT.practice);
+        } else await create("practice", data);
+        closeModal(); toast(f.dataset.id ? "Run saved." : "Run logged."); render();
+      } else if (f.matches("[data-import]")) {
+        await sendImport();
       } else if (f.matches("[data-addpart]")) {
         await create("parts", { name: d.name.trim(), sub: d.sub, have: +d.have || 0, need: +d.need || 0, ordered: 0, price: +d.price || 0, vendor: d.vendor });
         render();
@@ -1997,6 +2531,11 @@
   setInterval(checkDay, 60_000);
   document.addEventListener("visibilitychange", checkDay);
   window.addEventListener("focus", checkDay);
+  window.addEventListener("pagehide", () => Offline.releaseLease(device, CLIENT));
+  window.addEventListener("offline", markOffline);
+  window.addEventListener("online", checkConnection);
+  window.addEventListener("focus", () => { if (net.offline) checkConnection(); });
+  window.addEventListener("storage", (e) => { if (queue && e.key === queue.key) paintNet(); });
 
   boot();
 })();

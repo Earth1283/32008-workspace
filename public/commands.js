@@ -40,7 +40,7 @@
     const cached = (key, build) => { if (!cache.has(key)) cache.set(key, build()); return cache.get(key); };
 
     const issueById = new Map(F.issues.map((issue) => [issue.id, issue]));
-    const ref = (issue) => "FTC-" + issue.id;
+    const ref = (issue) => (issue.id < 0 ? "FTC-new" : "FTC-" + issue.id);
     const isOpen = (issue) => issue.status !== "done";
     const isOverdue = (issue) => isOpen(issue) && issue.due && F.days(issue.due) < 0;
     const isDueWithin = (issue, days) => isOpen(issue) && issue.due && F.days(issue.due) >= 0 && F.days(issue.due) <= days;

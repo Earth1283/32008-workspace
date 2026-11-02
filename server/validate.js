@@ -1,3 +1,7 @@
+import "../public/scoring.js";
+
+const { Scoring } = globalThis;
+
 export class HttpError extends Error {
   constructor(status, message, extra) {
     super(message);
@@ -26,6 +30,7 @@ const bool = (def = false) => ({ t: "bool", def });
 const oneOf = (values, def) => ({ t: "enum", values, def });
 const strs = (n, max = 64, min = 0) => ({ t: "strs", n, max, min });
 const list = (n, of) => ({ t: "list", n, of });
+const counts = (n) => ({ t: "counts", n });
 
 export const SPECS = {
   issues: {
@@ -53,13 +58,23 @@ export const SPECS = {
     author: str(64),
     status: oneOf(["draft", "final"], "draft"),
     problem: str(5000), tried: str(5000), result: str(5000), next: str(5000),
+    log: list(60, { who: str(64, true), date: date(true), what: oneOf(["logged", "reopened", "edited"]) }),
   },
   practice: {
     date: date(true),
-    driver: str(64),
-    auto: int(0, 10, true),
-    cycle: num(1, 600, true),
+    kind: oneOf(Object.keys(Scoring.KINDS), "full"),
+    sheet: str(20),
+    counts: counts(40),
+    drivers: strs(3),
+    routine: str(80),
+    version: str(80),
+    where: str(80),
+    result: oneOf(["win", "tie", "loss"], ""),
+    fail: oneOf(Object.keys(Scoring.FAILS), ""),
+    issue: int(0, 1_000_000),
+    cycle: num(1, 600),
     note: str(1000),
+    auto: int(0, 10),
   },
   meetings: {
     date: date(true),
@@ -124,6 +139,12 @@ function one(k, r, v) {
         return s;
       });
     }
+    case "counts": {
+      if (empty) return {};
+      if (typeof v !== "object" || Array.isArray(v) || Object.keys(v).length > r.n) throw bad(`${k} must be a short list of counts`);
+      for (const n of Object.values(v)) if (!Number.isInteger(n) || n < 0) throw bad(`${k} must be whole numbers`);
+      return { ...v };
+    }
     case "list": {
       if (empty) return [];
       if (!Array.isArray(v) || v.length > r.n) throw bad(`${k} has too many entries`);
@@ -142,6 +163,19 @@ export function clean(spec, input) {
     if (v !== undefined) out[k] = v;
   }
   return out;
+}
+
+/** Every count must be on the run's score sheet and possible in a match. */
+export function checkRun(run) {
+  if (!run.sheet) return;
+  const sheet = Scoring.SHEETS[run.sheet];
+  if (!sheet) throw bad("Unknown score sheet");
+  const allowed = new Map([...sheet.items, ...sheet.fouls].map((item) => [item.key, item]));
+  for (const [key, n] of Object.entries(run.counts)) {
+    const item = allowed.get(key);
+    if (!item) throw bad(`${key} isn't on the ${sheet.name} score sheet`);
+    if (n > item.max) throw bad(`${item.label} can't be more than ${item.max}`);
+  }
 }
 
 export const USERNAME = /^[a-z0-9][a-z0-9._-]{1,31}$/i;

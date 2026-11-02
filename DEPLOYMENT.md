@@ -147,7 +147,7 @@ Everyone needs to open `http://<machine-ip>:9000` on the same network as the ser
 
 ## HTTPS with a reverse proxy
 
-You only need this if people connect over the internet, or you don't trust the network. A reverse proxy on the same machine adds HTTPS and forwards to the app.
+You need this if people connect over the internet, you don't trust the network, or the app has to reopen with no connection at an event: browsers only allow the offline app files on HTTPS. Without HTTPS, a tab that's already open still works offline and syncs later. A reverse proxy on the same machine adds HTTPS and forwards to the app. The certificate must be one browsers trust, so a self-signed one won't turn on offline reopening.
 
 **Three settings that must be right**
 

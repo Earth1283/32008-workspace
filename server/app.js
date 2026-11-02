@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize, sep } from "node:path";
 import { openDb, makeStore, tx } from "./db.js";
-import { HttpError, SPECS, ACCESS, USERNAME, GH_LOGIN, GH_REPO, SUBS, clean } from "./validate.js";
+import { HttpError, SPECS, ACCESS, USERNAME, GH_LOGIN, GH_REPO, SUBS, clean, checkRun } from "./validate.js";
 import { hashPassword, checkPassword, DUMMY_HASH, newToken, sha256, tempPassword, parseCookies, makeThrottle } from "./auth.js";
 import { seedDemo, DEMO_PASSWORD } from "./demo.js";
 import { makeNotifier, localDate } from "./notify.js";
@@ -20,6 +20,11 @@ const DOC_COLLS = {
   milestones: { write: "admin", del: "admin" },
   phases:     { write: "admin", del: "admin" },
 };
+const IMPORTABLE = ["parts", "issues"];
+const MAX_IMPORT_ROWS = 2000;
+const CLIENT_ID = /^[\w-]{8,48}$/;
+const CLIENT_ID_KEEP_MS = 90 * 864e5;
+const NOTEBOOK_TEXT = ["title", "date", "problem", "tried", "result", "next"];
 const MIME = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
   ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".txt": "text/plain; charset=utf-8",
@@ -83,7 +88,10 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
   const ask = makeAsk({ store, key: geminiKey, model: geminiModel, configDir, fetch: geminiFetch, ...askLimits });
   const safely = (fn) => () => { try { const r = fn(); if (r && r.catch) r.catch((e) => console.error(e)); } catch (e) { console.error(e); } };
 
-  const purge = () => db.prepare("DELETE FROM sessions WHERE expires_at < ?").run(Date.now());
+  const purge = () => {
+    db.prepare("DELETE FROM sessions WHERE expires_at < ?").run(Date.now());
+    db.prepare("DELETE FROM client_ids WHERE created_at < ?").run(Date.now() - CLIENT_ID_KEEP_MS);
+  };
   purge();
   const timers = [
     setInterval(purge, 3600_000),
@@ -153,6 +161,25 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
     }
     return { ...person, id, access };
   }
+
+  /* A change sent again after a dropped connection carries the same client id, so it can't happen twice. */
+  const validClientId = (cid) => (typeof cid === "string" && CLIENT_ID.test(cid) ? cid : null);
+  const seenClientId = (cid) => (cid ? db.prepare("SELECT target FROM client_ids WHERE cid = ?").get(cid)?.target ?? null : null);
+  const recordClientId = (cid, target) => { if (cid) db.prepare("INSERT INTO client_ids (cid, target, created_at) VALUES (?, ?, ?)").run(cid, String(target), Date.now()); };
+
+  /** Notebook entries keep a dated record of being logged, reopened, or changed after logging. */
+  function notebookLog(before, doc, who) {
+    const wasFinal = before?.status === "final", isFinal = doc.status === "final";
+    const textChanged = wasFinal && NOTEBOOK_TEXT.some((k) => before[k] !== doc[k]);
+    const what = !wasFinal && isFinal ? "logged" : wasFinal && !isFinal ? "reopened" : textChanged ? "edited" : null;
+    const log = [...(before?.log ?? [])], date = today(), last = log.at(-1);
+    if (what && !(last && last.who === who && last.date === date && last.what === what)) log.push({ who, date, what });
+    return log.slice(-SPECS.notebook.log.n);
+  }
+  const prepareDoc = (coll, doc, before, who) => {
+    if (coll === "practice") checkRun(doc);
+    if (coll === "notebook") doc.log = notebookLog(before, doc, who);
+  };
 
   const adminCount = () => db.prepare("SELECT COUNT(*) AS n FROM users WHERE access = 'Admin'").get().n;
 
@@ -275,6 +302,27 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
       return res.end(s);
     }
 
+    if (a === "import" && !b && m === "POST") {
+      need(user, "member");
+      const body = await readJson(req, 4_000_000);
+      if (!IMPORTABLE.includes(body.coll)) throw new HttpError(400, "That can't be imported");
+      if (!Array.isArray(body.rows) || !body.rows.length) throw new HttpError(400, "There's nothing to import");
+      if (body.rows.length > MAX_IMPORT_ROWS) throw new HttpError(413, `Import at most ${MAX_IMPORT_ROWS} rows at a time`);
+      const docs = body.rows.map((row, k) => {
+        try { return clean(SPECS[body.coll], row); } catch (e) { throw new HttpError(400, `Row ${k + 1}: ${e.message}`); }
+      });
+      const cid = validClientId(body.cid);
+      const created = tx(db, () => {
+        const seen = seenClientId(cid);
+        if (seen !== null) return Number(seen);
+        for (const doc of docs) store.put(body.coll, body.coll === "issues" ? store.nextIssueId() : randomBytes(5).toString("hex"), doc, user.id);
+        recordClientId(cid, docs.length);
+        return docs.length;
+      });
+      broadcast(body.coll, req.headers["x-client"]);
+      return json(res, 201, { created });
+    }
+
     if (a === "meta" && m === "PUT" && (b === "team" || b === "settings")) {
       need(user, "admin");
       const doc = clean(SPECS[b], await readJson(req, 1_500_000));
@@ -365,10 +413,16 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
     if (cfg) {
       if (!b && m === "POST") {
         need(user, cfg.write);
-        const doc = clean(SPECS[a], await readJson(req));
+        const body = await readJson(req);
+        const doc = clean(SPECS[a], body);
+        prepareDoc(a, doc, null, user.id);
+        const cid = validClientId(body.cid);
+        const repeat = seenClientId(cid);
+        if (repeat !== null) return json(res, 200, store.get(a, repeat) ?? { ...doc, id: a === "issues" ? Number(repeat) : repeat, rev: 1 });
         const id = tx(db, () => {
           const id = a === "issues" ? store.nextIssueId() : randomBytes(5).toString("hex");
           store.put(a, id, doc, user.id);
+          recordClientId(cid, id);
           return id;
         });
         broadcast(a, req.headers["x-client"]);
@@ -388,6 +442,7 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
           before = store.get(a, b);
           if (!before) throw new HttpError(404, "Not found");
           if (body.rev !== undefined && body.rev !== before.rev) throw new HttpError(409, "Someone else changed this first", { current: before });
+          prepareDoc(a, doc, before, user.id);
           store.put(a, b, doc, user.id);
           return store.get(a, b);
         });

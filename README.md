@@ -14,12 +14,12 @@ It runs as a single Node process with a SQLite file. There is nothing to install
 | **Notebook** | Finishing an issue offers to draft an engineering notebook entry (Problem, What we tried, Result, Next step), pre-filled from the issue and its comments. The sidebar counts finished issues that still have no entry |
 | **Season** | Timeline of phases and milestones with a today marker |
 | **Parts** | Have, ordered and needed counts, spend against a budget |
-| **Practice** | Log auto success and cycle times, with trend charts |
+| **Practice** | Log full runs, auto-only runs, scrimmages and matches on the season's score sheet. Compares routines and drivers, tracks how often you reach ranking point targets, and turns a problem into an issue in one click |
 | **Meetings** | Agenda, notes, attendees and action items. An action item becomes an issue in one click |
 | **Pit board** | Large type for glancing at from across the pit: countdown, subsystem health, blockers |
 | **Settings** | Profile, team identity and logo, theme and accent color, density, which notifications you get, members and access, GitHub |
 
-Changes show up on teammates' screens within a moment, with no refresh.
+Changes show up on teammates' screens within a moment, with no refresh. The app keeps working when the connection drops (see [Working offline](#working-offline)).
 
 ## Quick start
 
@@ -65,6 +65,28 @@ Type a question that starts with "what's" in Ctrl K, for example `what's blockin
 - Sent: issue titles, status, owners, due dates and blocked reasons; people's first names and roles; parts; milestones; practice runs; meeting titles and action items; notebook titles. Never sent: comments, issue descriptions, notebook text, passwords or tokens.
 - Limits: 12 questions a minute and 300 a day per person. An admin can switch it off in Settings, Integrations.
 - The wording is yours to change. On first run the server writes `config/ask-system.md` and `config/ask-prompt.md`; edit and save, and the next question uses them, no restart. Delete a file to get the original back. `config/` is not in git, so a `git pull` never conflicts with your edits. With Docker it is mounted from `./config` next to the compose file.
+
+## Practice runs and the score sheet
+
+**Log a run** scores a run on the current season's sheet: the point values, the most each item can count, and the ranking point targets. The sheets live in `public/scoring.js`, and each run remembers which one it used, so adding next season's game leaves old runs correct.
+
+The 2026–27 sheet is BIOBUZZ, from Competition Manual tables 10-2, 10-3 and 10-4. Ranking point targets are the ones for regular events; Regional and FIRST Championship targets haven't been announced, so check Team Updates when they are. SWARM counts your alliance's LEAVE and PARK points, so one robot alone can only reach 13 of 16.
+
+## Importing from Excel
+
+Settings, Workspace, Import brings in parts or issues, and the Parts page has the same button. Choose a CSV file (in Excel: File, Save As, CSV) or copy the cells and paste them. The columns are matched by name and you can change the matches. Rows with the same part name or issue title as something already here are left out, and the preview says why each row was skipped. Nothing is saved until you press Import, and one bad row stops the whole import.
+
+Imported issues don't send notifications.
+
+## Working offline
+
+Teams can't run Wi-Fi or hotspots at events (rule E301), and venue connections fail, so the app doesn't depend on one.
+
+- Each device keeps a copy of the team's data. Without a connection you can read everything and change issues, notebook entries, practice runs, parts and meetings, and mark inbox items read. The pill in the corner shows how many changes are waiting.
+- Changes go out in order when the server is back. New issues get their real number then, and until that point they show as FTC-new. If a teammate edited the same issue, each field you didn't both change is kept; where you both changed a field, your version wins and you're told. Anything that can't be applied, such as an edit to something a teammate deleted, stays in the list to retry or discard.
+- Settings, members, GitHub, imports and asking the workspace need a connection.
+- **Reopening the app with no connection needs HTTPS.** Browsers only allow the service worker that stores the app on secure addresses. On plain HTTP an open tab still works and syncs later, but closing it or reloading ends the session until you're back online. See [HTTPS](DEPLOYMENT.md#https-with-a-reverse-proxy).
+- Waiting changes belong to the person who made them, so a shared tablet won't send them under someone else's name. Signing out erases the saved copy of the team's data from that device, and waits until you're online. While you stay signed in, that copy sits in the browser's storage, so anyone using that browser profile can read it.
 
 ## GitHub
 
@@ -120,7 +142,11 @@ server/   server.js   entry point
           github.js   pull request sync
           admin.js    operator commands
           demo.js     sample data loader
-public/   the app: index.html, app.js, data.js, style.css, theme.js (no build step)
+public/   the app, with no build step: index.html, app.js, data.js, style.css, theme.js
+          scoring.js  season score sheets, also used by the server
+          csv.js      reading spreadsheets
+          offline.js  the saved copy and the queue of waiting changes
+          sw.js       keeps the app's own files on the device
 test/     API tests and end-to-end UI tests
 data/     SQLite files (git-ignored)
 ```
@@ -135,7 +161,7 @@ All routes are under `/api` and need a session, except `session`, `login` and `s
 |---|---|
 | `GET /session`, `POST /login`, `POST /logout`, `POST /setup`, `POST /password` | Sessions and first-run setup |
 | `GET /state` | Everything the app needs, in one response |
-| `POST /<collection>`, `PUT /<collection>/<id>`, `DELETE /<collection>/<id>` | Create, replace, delete. Collections: `issues`, `notebook`, `practice`, `meetings`, `parts`, `milestones`, `phases`. Every record carries a `rev`. Send it back with a `PUT` and the save is refused with `409` and the current copy if someone saved first; leave it out and last write wins |
+| `POST /<collection>`, `PUT /<collection>/<id>`, `DELETE /<collection>/<id>` | Create, replace, delete. A `POST` may carry a client-made `cid`, and repeating it returns the first result instead of creating a second record. Collections: `issues`, `notebook`, `practice`, `meetings`, `parts`, `milestones`, `phases`. Every record carries a `rev`. Send it back with a `PUT` and the save is refused with `409` and the current copy if someone saved first; leave it out and last write wins |
 | `PUT /meta/team`, `PUT /meta/settings` | Team identity and settings (admin) |
 | `PATCH /people/<id>` | Your own name and role, or anyone's if admin |
 | `POST /users`, `PATCH /users/<id>`, `POST /users/<id>/reset` | Members and access (admin) |
@@ -143,13 +169,14 @@ All routes are under `/api` and need a session, except `session`, `login` and `s
 | `PUT /prefs` | Your notification choices |
 | `POST /notifications/read` | Mark `{ "ids": [...] }` or `{ "all": true }` as read. Your inbox comes with `GET /state` |
 | `POST /github/sync`, `PUT /github/token`, `DELETE /github/token` | Check GitHub now, save or remove the access token (admin) |
+| `POST /import` | `{ "coll": "parts" or "issues", "rows": [...], "cid": "..." }`. All rows or none, up to 2000 |
 | `GET /export` | JSON backup (admin) |
 
 ## Development
 
 ```sh
 npm install        # only needed for the UI tests (jsdom)
-npm test           # 25 tests: API, admin tools, and the real UI driven against the real server
+npm test           # API, admin tools, scoring, CSV, the offline queue, and the real UI driven against the real server
 ```
 
 The tests start the server in-process on a random port with an in-memory database, so they never touch `data/`.
@@ -161,7 +188,8 @@ The tests start the server in-process on a random port with an in-memory databas
 - **GitHub** sync is up to a few minutes behind, and reads the 50 most recently updated pull requests on each check.
 - **Notifications** appear in the app only. Nothing is emailed or pushed to phones.
 - **Accounts can't be deleted**, because their names appear on past work. Set them to Viewer instead.
-- **No import.** The JSON export is for reading and archiving. Recover from database backups.
+- **No restore from the JSON export.** It's for reading and archiving. Recover from database backups. CSV import covers parts and issues only.
+- **Subsystems are fixed** in `server/validate.js` and `public/data.js`.
 - Fonts load from Google Fonts and fall back to system fonts offline.
 
 ## License

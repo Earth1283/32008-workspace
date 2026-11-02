@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { HttpError, SUB_NAMES } from "./validate.js";
 import { localDate } from "./notify.js";
 
+const { Scoring } = globalThis;
+
 const API = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_MODEL = "gemini-flash-lite-latest";
 const TIMEOUT_MS = 8000;
@@ -131,7 +133,12 @@ export function describeWorkspace(store) {
 
   lines.push("", "Recent practice runs:");
   for (const r of store.list("practice").sort((a, b) => b.date.localeCompare(a.date)).slice(0, 15)) {
-    lines.push(fields([["date", r.date], ["driver", people.get(r.driver) ?? r.driver], ["auto points", r.auto], ["cycle seconds", r.cycle]]));
+    const score = Scoring.tally(r);
+    lines.push(fields([
+      ["date", r.date], ["type", Scoring.KINDS[r.kind]], ["drivers", names(r.drivers)], ["auto routine", cut(r.routine, 60)], ["code", cut(r.version, 40)],
+      ["auto points", score?.auto ?? r.auto], ["total points", score?.total], ["hive tips", score?.tips], ["ranking points", score?.rp],
+      ["cycle seconds", r.cycle], ["problem", Scoring.FAILS[r.fail]?.label],
+    ]));
   }
 
   lines.push("", "Recent meetings:");
