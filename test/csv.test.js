@@ -68,3 +68,29 @@ test("issues: status, priority, people and dates map onto the app's values", () 
   assert.deepEqual([ready[1].status, ready[1].pri, ready[1].who, ready[1].due], ["done", "med", ["jc"], undefined]);
   assert.deepEqual(notes, { unknownPeople: 1, badDates: 1 });
 });
+
+test("prices with decimal commas and grouped thousands keep their value", () => {
+  assert.equal(CsvImport.parseNumber("€1.234,56"), 1234.56);
+  assert.equal(CsvImport.parseNumber("1.234.567,89"), 1234567.89);
+  assert.equal(CsvImport.parseNumber("$1,234.56"), 1234.56);
+  assert.equal(CsvImport.parseNumber("1,234,567.89"), 1234567.89);
+  assert.equal(CsvImport.parseNumber("12.34,56"), null, "malformed grouping is not silently reinterpreted");
+});
+
+test("Unicode titles and emoji import and deduplicate by their saved names", () => {
+  for (const [kind, header, key] of [["parts", "Part", "name"], ["issues", "Title", "title"]]) {
+    const table = CsvImport.parse(`${header},Subsystem\n电机,team\n传感器,team\n🦾,team\n🦾,team\nOld Part,team\n`);
+    const plan = plain(CsvImport.prepare(kind, table, CsvImport.guessColumns(kind, table.headers), { ...ctx, existing: ["OLD PART"] }));
+    assert.deepEqual(plan.ready.map((doc) => doc[key]), ["电机", "传感器", "🦾"]);
+    assert.deepEqual(plan.skipped.map((row) => row.line), [5, 6]);
+  }
+});
+
+test("out-of-range parts are skipped before sending the import", () => {
+  const table = CsvImport.parse("Part,Have,Need,Ordered,Price\nToo many,100001,1,0,1\nToo costly,0,1,0,1000001\nAt limits,100000,100000,100000,1000000\nGood,0,1,0,2\n");
+  const plan = plain(CsvImport.prepare("parts", table, CsvImport.guessColumns("parts", table.headers), ctx));
+  assert.deepEqual(plan.ready.map((part) => part.name), ["At limits", "Good"]);
+  assert.deepEqual(plan.skipped.map((row) => row.line), [2, 3]);
+  assert.match(plan.skipped[0].reason, /have.*100000/);
+  assert.match(plan.skipped[1].reason, /price.*1000000/);
+});

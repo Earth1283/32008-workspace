@@ -37,6 +37,7 @@
 
   const normalize = (s) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   const clip = (s, max) => String(s ?? "").trim().slice(0, max);
+  const titleIdentity = (s) => clip(s, 200).normalize("NFKC").toLowerCase().replace(/\s+/g, " ");
   const keyWord = (table, text, fallback) => Object.keys(table).find((k) => table[k].includes(normalize(text))) ?? fallback;
 
   function decode(buffer) {
@@ -98,7 +99,15 @@
   function parseNumber(text) {
     const cleaned = String(text ?? "").replace(/[$€£\s]/g, "");
     if (!cleaned) return 0;
-    const plain = /^\d+,\d{1,2}$/.test(cleaned) ? cleaned.replace(",", ".") : cleaned.replace(/,/g, "");
+    let plain;
+    if (cleaned.includes(",") && cleaned.includes(".")) {
+      const decimal = cleaned.lastIndexOf(",") > cleaned.lastIndexOf(".") ? "," : ".";
+      const group = decimal === "," ? "." : ",";
+      const [whole, fraction, extra] = cleaned.split(decimal);
+      const groups = whole.split(group);
+      if (extra !== undefined || !/^\d+$/.test(fraction) || !/^\d{1,3}$/.test(groups[0]) || groups.slice(1).some((s) => !/^\d{3}$/.test(s))) return null;
+      plain = groups.join("") + "." + fraction;
+    } else plain = /^\d+,\d{1,2}$/.test(cleaned) ? cleaned.replace(",", ".") : cleaned.replace(/,/g, "");
     const value = Number(plain);
     return Number.isFinite(value) && value >= 0 ? value : null;
   }
@@ -137,6 +146,8 @@
       const value = parseNumber(cell(key));
       if (value === null) return { reason: `${key} isn't a number` };
       counts[key] = key === "price" ? value : Math.round(value);
+      const max = key === "price" ? 1_000_000 : 100_000;
+      if (counts[key] > max) return { reason: `${key} can't be more than ${max}` };
     }
     return { doc: { name: clip(cell("name"), 200), sub: findSubsystem(cell("sub"), ctx.subs), ...counts, need: cell("need") ? counts.need : 1, vendor: clip(cell("vendor"), 100) } };
   }
@@ -157,11 +168,11 @@
   /** Turns rows into documents. Rows that can't be used, or that already exist, are listed with the reason. */
   function prepare(kind, table, columns, ctx) {
     const titleKey = FIELDS[kind][0].key;
-    const seen = new Set(ctx.existing.map(normalize));
+    const seen = new Set(ctx.existing.map(titleIdentity));
     const ready = [], skipped = [], notes = { unknownPeople: 0, badDates: 0 };
     for (const row of table.rows.slice(0, MAX_ROWS)) {
       const cell = (key) => cellOf(row, columns, key);
-      const title = normalize(cell(titleKey));
+      const title = titleIdentity(cell(titleKey));
       if (!title) { skipped.push({ line: row.line, reason: `no ${FIELDS[kind][0].label.toLowerCase()}` }); continue; }
       if (seen.has(title)) { skipped.push({ line: row.line, reason: `${clip(cell(titleKey), 40)} is already here` }); continue; }
       const { doc, reason } = kind === "parts" ? partFrom(cell, ctx) : issueFrom(cell, ctx, notes);

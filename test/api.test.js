@@ -640,3 +640,35 @@ test("runs saved before the score sheet keep their driver", async () => {
   db.close();
   rmSync(dir, { recursive: true });
 });
+
+test("calendar dates must exist, and unknown score sheets return validation errors", async () => {
+  const t = await boot();
+  try {
+    const a = t.client();
+    await a.post("/api/setup", SETUP);
+    for (const date of ["2026-02-29", "2026-02-30", "2026-04-31"]) {
+      assert.equal((await a.post("/api/meetings", { date, title: "Invalid day" })).status, 400, date);
+      assert.equal((await a.post("/api/practice", { date, sheet: "biobuzz", counts: {} })).status, 400, date);
+    }
+    assert.equal((await a.post("/api/meetings", { date: "2028-02-29", title: "Leap day" })).status, 201);
+    for (const sheet of ["constructor", "__proto__", "toString"]) {
+      const r = await a.post("/api/practice", { date: "2026-11-08", sheet, counts: { leave: 1 } });
+      assert.equal(r.status, 400, sheet);
+      assert.equal(r.data.error, "Unknown score sheet");
+    }
+  } finally { await t.close(); }
+});
+
+test("malformed cookie encoding does not break sign-in or an existing session", async () => {
+  const t = await boot();
+  try {
+    const a = t.client();
+    await a.post("/api/setup", SETUP);
+    const r = await a.call("GET", "/api/session", undefined, { Cookie: `${a.cookie()}; unrelated=%E0%A4%A` });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.user.username, "joseph");
+    assert.equal((await a.call("GET", "/api/state", undefined, { Cookie: "sid=%ZZ" })).status, 401);
+    const b = t.client("new-login");
+    assert.equal((await b.call("POST", "/api/login", { username: "joseph", password: SETUP.admin.password }, { Cookie: "unrelated=%" })).status, 200);
+  } finally { await t.close(); }
+});

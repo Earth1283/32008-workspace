@@ -241,7 +241,7 @@ textarea.in { resize: vertical; min-height: 64px; line-height: 1.5; }
 .col h4 { display: flex; align-items: center; gap: 8px; font-weight: 600; padding: 4px 4px 10px; }
 .col h4 span { color: var(--faint); font-weight: 400; }
 .card {
-  display: block; width: 100%; background: var(--raise); border: 0; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; box-shadow: var(--shadow);
+  display: block; width: 100%; background: var(--raise); border: 0; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; box-shadow: var(--shadow); overflow-wrap: anywhere;
 }
 .card:hover { box-shadow: 0 2px 8px rgba(0, 0, 0, .25), 0 0 0 1px var(--faint); }
 .card.on { box-shadow: 0 0 0 2px var(--brand); }
@@ -286,7 +286,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .gbar i { transform-origin: left; position: absolute; inset: 0 auto 0 0; background: var(--brand); opacity: .55; border-radius: 3px; }
 .gline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line); }
 .gline.today { background: var(--brand); width: 2px; transform-origin: top; }
-.gline.main { background: var(--text); opacity: .5; }
+.gline.qualifier { background: var(--text); opacity: .5; }
 .gtag { position: absolute; top: 0; font-size: 11px; color: var(--dim); transform: translateX(-50%); white-space: nowrap; }
 
 /* charts */
@@ -591,3 +591,26 @@ button.chip.moved { animation: pop .3s var(--spring); }
 @keyframes bump { 40% { transform: scale(1.35); } }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
+
+/* Keep form actions visible while their content scrolls. */
+#modal:has(> form) { max-height: calc(86dvh - 16px); }
+#modal > form { display: flex; flex-direction: column; max-height: calc(86dvh - 18px); }
+#modal > form > .bd { min-height: 0; overflow-y: auto; }
+#modal > form > :not(.bd) { flex-shrink: 0; }
+
+/* Parts scroll within the table instead of widening the whole page. */
+.parts-table table { min-width: 860px; }
+.parts-table td:first-child, .parts-table td:nth-child(8) { overflow-wrap: anywhere; }
+.parts-table td:first-child { min-width: 140px; }
+.in.num-in { width: 64px; min-width: 64px; text-align: right; padding: 3px 6px; }
+
+/* Let the pit board scroll through every subsystem. */
+.pit-grid { flex-shrink: 0; }
+
+@media (max-width: 560px) {
+  .setrow { flex-wrap: wrap; gap: 12px; }
+  .setrow > :first-child { flex-basis: 100%; min-width: 0; }
+  .setrow .seg { max-width: 100%; flex-wrap: wrap; }
+  .setrow .avl { flex-wrap: wrap; }
+  .setrow .in { max-width: 100%; }
+}

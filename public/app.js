@@ -145,6 +145,7 @@
   function persist(coll, doc) {
     const key = coll + doc.id;
     clearTimeout(timers.get(key));
+    timers.delete(key);
     if (shouldQueue()) { queueSave(coll, doc); return Promise.resolve(); }
     const p = (queues.get(key) || Promise.resolve()).then(() => save(coll, doc));
     const settled = p.catch(() => {});
@@ -160,6 +161,11 @@
     paintNet();
   }
   const timers = new Map();
+  window.addEventListener("beforeunload", (e) => {
+    if (!S.ready || (!timers.size && !pending.size)) return;
+    e.preventDefault();
+    e.returnValue = "";
+  });
   const soon = (key, fn, ms = 450) => { clearTimeout(timers.get(key)); timers.set(key, setTimeout(() => { timers.delete(key); fn(); }, ms)); };
   const persistSoon = (coll, doc) => soon(coll + doc.id, () => persist(coll, doc));
   const saveTeam = () => write("PUT", "/api/meta/team", F.team).catch(writeFailed);
@@ -891,7 +897,7 @@
             return `<div class="grow"><span class="lab">${esc(p.name)}</span><div class="gtrack"><div class="gbar" style="left:${a}%;width:${Math.max(b - a, 0.5)}%" title="${F.fmt(p.start)} to ${F.fmt(p.end)}"><i style="width:${done}%"></i></div></div></div>`;
           }).join("")}
           <div style="position:absolute;left:130px;right:0;top:0;bottom:0;pointer-events:none">
-            ${F.milestones.map((m) => `<div class="gline ${m.main ? "main" : ""}" style="left:${pct(m.date)}%"></div>`).join("")}
+            ${F.milestones.map((m) => `<div class="gline ${m.main ? "qualifier" : ""}" style="left:${pct(m.date)}%"></div>`).join("")}
             <div class="gline today" style="left:${todayP}%"></div>
           </div>
         </div>` : `<div class="empty"><b>Nothing planned yet</b>${admin ? "Add a phase or a milestone to start the timeline." : "An admin can add phases and milestones."}</div>`}
@@ -934,7 +940,7 @@
     return `
       <div class="ph"><h1>Parts</h1><div class="r"><button class="btn" data-act="import" data-kind="parts">Import CSV</button></div></div>
       <div class="wrap">
-        <div class="hero"><h1>$${spent.toFixed(0)}${F.budget ? ` of $${F.budget.toLocaleString()}` : ""}</h1><p>Counts everything we own or have ordered.${F.budget ? "" : (isAdmin() ? " Set a budget in Settings to track it." : "")}</p>
+        <div class="hero"><h1>$${Math.round(spent).toLocaleString()}${F.budget ? ` of $${F.budget.toLocaleString()}` : ""}</h1><p>Counts everything we own or have ordered.${F.budget ? "" : (isAdmin() ? " Set a budget in Settings to track it." : "")}</p>
           ${F.budget ? `<div class="bar ${spent > F.budget ? "over" : ""}" style="margin-top:14px"><i style="width:${pct}%"></i></div>` : ""}</div>
         <form class="form parts" data-addpart>
           <input class="in" name="name" placeholder="Part name" required aria-label="Part name">
@@ -945,13 +951,13 @@
           <input class="in" name="vendor" placeholder="Vendor" aria-label="Vendor">
           <button class="btn pri">Add part</button>
         </form>
-        ${F.parts.length ? `<table>
+        ${F.parts.length ? `<div class="tbl parts-table"><table>
           <thead><tr><th>Part</th><th>Subsystem</th><th class="num">Have</th><th class="num">Ordered</th><th class="num">Need</th><th>Status</th><th class="num">Unit</th><th>Vendor</th><th></th></tr></thead>
           <tbody>${F.parts.map((p) => {
             const st = p.have >= p.need ? ["ok", "In stock"] : p.have + p.ordered >= p.need ? ["warn", "Ordered"] : ["bad", "Needed"];
-            return `<tr data-part="${esc(p.id)}"><td>${esc(p.name)}</td><td class="dim">${F.subs[p.sub]}</td><td class="num">${num(p, "have")}</td><td class="num">${num(p, "ordered")}</td><td class="num">${num(p, "need")}</td><td>${dot(st[0])} ${st[1]}</td><td class="num">$${p.price.toFixed(2)}</td><td class="dim">${esc(p.vendor)}</td><td><button class="rm" data-rm="parts:${esc(p.id)}" aria-label="Remove ${esc(p.name)}">Remove</button></td></tr>`;
+            return `<tr data-part="${esc(p.id)}"><td>${esc(p.name)}</td><td class="dim">${F.subs[p.sub]}</td><td class="num">${num(p, "have")}</td><td class="num">${num(p, "ordered")}</td><td class="num">${num(p, "need")}</td><td class="nowrap">${dot(st[0])} ${st[1]}</td><td class="num">$${p.price.toFixed(2)}</td><td class="dim">${esc(p.vendor)}</td><td><button class="rm" data-rm="parts:${esc(p.id)}" aria-label="Remove ${esc(p.name)}">Remove</button></td></tr>`;
           }).join("")}</tbody>
-        </table>` : `<div class="empty"><b>No parts yet</b>Add what you own and what you still need.</div>`}
+        </table></div>` : `<div class="empty"><b>No parts yet</b>Add what you own and what you still need.</div>`}
       </div>`;
   };
 
@@ -1139,7 +1145,7 @@
     const m = F.meetings.find((x) => x.id === S.mtSel) || F.meetings[0];
     const head = `<div class="ph"><h1>Meetings</h1><div class="r"><button class="btn" data-act="new-meeting">New meeting</button></div></div>`;
     if (!m) return head + `<div class="empty"><b>No meetings yet</b>Create one to keep an agenda, notes and action items.</div>`;
-    const list = F.meetings.map((x) => `<button class="pi ${x.id === m.id ? "on" : ""}" data-mt="${esc(x.id)}"><b>${esc(x.title)}</b><small>${F.fmt(x.date)}${F.days(x.date) >= 0 ? " · upcoming" : ""} · ${x.who.length} people</small></button>`).join("");
+    const list = F.meetings.map((x) => `<button class="pi ${x.id === m.id ? "on" : ""}" data-mt="${esc(x.id)}"><b>${esc(x.title)}</b><small>${F.fmt(x.date)}${F.days(x.date) >= 0 ? " · upcoming" : ""} · ${x.who.length} ${x.who.length === 1 ? "person" : "people"}</small></button>`).join("");
     return `${head}
       <div class="pane2"><div class="pl">${list}</div>
       <div class="pr"><div class="dim">${F.fmt(m.date)}</div><h2>${esc(m.title)}</h2>

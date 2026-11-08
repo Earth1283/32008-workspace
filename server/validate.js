@@ -12,7 +12,11 @@ export class HttpError extends Error {
 const bad = (m) => new HttpError(400, m);
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
-const validDate = (s) => DATE.test(s) && !Number.isNaN(Date.parse(s + "T00:00:00Z"));
+const validDate = (s) => {
+  if (!DATE.test(s)) return false;
+  const date = new Date(s + "T00:00:00Z");
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === s;
+};
 
 export const SUBS = ["drive", "intake", "lift", "vision", "electronics", "auto", "teleop", "notebook", "outreach", "team"];
 export const SUB_NAMES = {
@@ -168,8 +172,8 @@ export function clean(spec, input) {
 /** Every count must be on the run's score sheet and possible in a match. */
 export function checkRun(run) {
   if (!run.sheet) return;
+  if (!Object.hasOwn(Scoring.SHEETS, run.sheet)) throw bad("Unknown score sheet");
   const sheet = Scoring.SHEETS[run.sheet];
-  if (!sheet) throw bad("Unknown score sheet");
   const allowed = new Map([...sheet.items, ...sheet.fouls].map((item) => [item.key, item]));
   for (const [key, n] of Object.entries(run.counts)) {
     const item = allowed.get(key);

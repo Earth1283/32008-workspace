@@ -312,13 +312,19 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
         try { return clean(SPECS[body.coll], row); } catch (e) { throw new HttpError(400, `Row ${k + 1}: ${e.message}`); }
       });
       const cid = validClientId(body.cid);
+      const imported = [];
       const created = tx(db, () => {
         const seen = seenClientId(cid);
         if (seen !== null) return Number(seen);
-        for (const doc of docs) store.put(body.coll, body.coll === "issues" ? store.nextIssueId() : randomBytes(5).toString("hex"), doc, user.id);
+        for (const doc of docs) {
+          const id = body.coll === "issues" ? store.nextIssueId() : randomBytes(5).toString("hex");
+          store.put(body.coll, id, doc, user.id);
+          imported.push(store.get(body.coll, id));
+        }
         recordClientId(cid, docs.length);
         return docs.length;
       });
+      for (const doc of imported) safely(() => notifier.changed(body.coll, null, doc, user.id))();
       broadcast(body.coll, req.headers["x-client"]);
       return json(res, 201, { created });
     }

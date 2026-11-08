@@ -50,6 +50,7 @@
   const hasResult = (kind) => kind === "scrimmage" || kind === "match";
 
   function tally(run) {
+    if (!Object.hasOwn(SHEETS, run.sheet)) return null;
     const sheet = SHEETS[run.sheet];
     if (!sheet || !run.counts) return null;
     const count = (key) => run.counts[key] ?? 0;

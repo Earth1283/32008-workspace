@@ -30,3 +30,9 @@ test("a win adds 3 ranking points, a tie 1, and fouls credit the opponent", () =
 test("runs from before the score sheet have no score", () => {
   assert.equal(Scoring.tally({ auto: 7, cycle: 30 }), null);
 });
+
+test("unknown score sheets, including inherited object keys, have no score", () => {
+  for (const sheet of ["nope", "constructor", "__proto__", "toString"]) {
+    assert.equal(Scoring.tally({ sheet, counts: { leave: 1 } }), null);
+  }
+});
