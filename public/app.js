@@ -12,7 +12,7 @@
     toastTimer: null, g: 0,
     setTab: "profile", density: "comfortable", accent: "",
     prefs: { due: true, blocked: true, mention: true, pr: true, digest: false, follow: [] },
-    inbox: [], github: {}, autoPr: true, ask: false, aiOn: true, iboxTab: "you",
+    inbox: [], github: {}, scoutingSources: [], autoPr: true, ask: false, aiOn: true, iboxTab: "you",
     runRoutine: "", runDriver: "", imp: null,
   };
   const ACCENTS = [["", "Steel blue", "#1A6FA8"], ["#38BDF8", "Sky", "#38BDF8"], ["#14B8A6", "Teal", "#14B8A6"], ["#22A06B", "Green", "#22A06B"],
@@ -185,7 +185,7 @@
     milestones: (a, b) => a.date.localeCompare(b.date),
     phases: (a, b) => a.start.localeCompare(b.start),
   };
-  const SYNCED_COLLECTIONS = ["milestones", "phases", "issues", "parts", "practice", "meetings", "notebook"];
+  const SYNCED_COLLECTIONS = ["milestones", "phases", "issues", "parts", "practice", "meetings", "notebook", "scouting"];
   const newClientId = () => `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
   const newLocalId = (coll) => (coll === "issues" ? -(Date.now() % 1e12 + Math.floor(Math.random() * 1000)) : "new" + newClientId());
 
@@ -226,8 +226,10 @@
     S.prefs = st.prefs;
     S.inbox = st.inbox;
     S.github = st.github || {};
+    S.scoutingSources = st.scoutingSources || [];
+    F.scoutEvents = st.scoutEvents || [];
     F.people = st.people;
-    for (const k of SYNCED_COLLECTIONS) { F[k] = st[k]; if (SORT[k]) F[k].sort(SORT[k]); F[k].forEach(remember); }
+    for (const k of SYNCED_COLLECTIONS) { F[k] = st[k] || []; if (SORT[k]) F[k].sort(SORT[k]); F[k].forEach(remember); }
   }
   const withQueuedChanges = (st) => (queue ? queue.overlay(st) : st);
   function adopt(st) {
@@ -295,7 +297,7 @@
     net.checking = false;
   }
 
-  const OP_NOUN = { issues: "issue", notebook: "notebook entry", practice: "run", meetings: "meeting", parts: "part" };
+  const OP_NOUN = { issues: "issue", notebook: "notebook entry", practice: "run", meetings: "meeting", parts: "part", scouting: "scouting observation" };
   const OP_VERB = { create: "New", save: "Changed", remove: "Deleted" };
   function opLabel(op) {
     if (op.type === "read") return "Inbox items marked as read";
@@ -402,7 +404,7 @@
   function lockPage() {
     const page = $("#page");
     page.querySelectorAll(WRITE_ONLY).forEach((el) => el.remove());
-    page.querySelectorAll("input, textarea, select, [data-attend]").forEach((el) => { if (!el.matches("[data-subf], [data-run-filter]")) el.disabled = true; });
+    page.querySelectorAll("input, textarea, select, [data-attend]").forEach((el) => { if (!el.matches("[data-subf], [data-run-filter], [data-scout-select], [data-scout-sort], [data-scout-search] input, [data-scout-search] select")) el.disabled = true; });
     page.querySelectorAll("[data-drag]").forEach((el) => { el.draggable = false; });
   }
   const renderSide = () => { $("#side").innerHTML = sideHtml(); };
@@ -630,6 +632,7 @@
     season: '<rect x="2" y="3.5" width="12" height="10" rx="1.5"/><path d="M2 6.8h12M5.5 2v3M10.5 2v3"/>',
     notebook: '<rect x="3.5" y="2" width="9" height="12" rx="1.5"/><path d="M6 5.5h4M6 8h4"/>',
     parts: '<path d="M8 2 13.5 5v6L8 14 2.5 11V5Z"/><path d="M2.8 5.2 8 8l5.2-2.8M8 8v6"/>',
+    scouting: '<circle cx="6" cy="6" r="3.5"/><path d="m9 9 4 4M4.5 6h3M6 4.5v3"/>',
     practice: '<path d="M2 12 5.5 8l2.5 2L13 4"/><path d="M10 4h3v3"/>',
     meetings: '<circle cx="6" cy="6" r="2"/><circle cx="11" cy="7" r="1.6"/><path d="M2 13c.3-2 1.8-3.2 4-3.2s3.7 1.2 4 3.2M10.5 10c1.6 0 2.8.9 3.1 2.6"/>',
     pit: '<rect x="2" y="3" width="12" height="8.5" rx="1.5"/><path d="M6 14h4"/>',
@@ -679,7 +682,7 @@
 
   /* ---------- sidebar ---------- */
   const NAV = [["home", "Home", "home"], ["inbox", "Inbox", "inbox"], ["mine", "My issues", "me"], ["issues", "Issues", "issues"]];
-  const NAV2 = [["season", "Season", "season"], ["notebook", "Notebook", "notebook"], ["parts", "Parts", "parts"], ["practice", "Practice", "practice"], ["meetings", "Meetings", "meetings"]];
+  const NAV2 = [["season", "Season", "season"], ["notebook", "Notebook", "notebook"], ["parts", "Parts", "parts"], ["practice", "Practice", "practice"], ["scouting", "Scouting", "scouting"], ["meetings", "Meetings", "meetings"]];
   const sideHtml = () => {
     const onIssues = S.route === "issues";
     const navBtn = ([k, label, ic], extra = "") => {
@@ -787,6 +790,8 @@
 
   /* ---------- views ---------- */
   const views = {};
+  const scoutPage = window.ScoutingUI({ F, canWrite, isAdmin, sources: () => S.scoutingSources, setSources: (value) => { S.scoutingSources = value; }, call, create, persist, render, toast, showModal, closeModal, footer: (label) => footer(label), refresh });
+  views.scouting = scoutPage.view;
 
   views.issues = () => {
     const tabs = [["open", "Open"], ["mine", "Mine"], ["blocked", "Blocked"], ["notebook", "Needs notebook"], ["all", "All"]];
@@ -1985,7 +1990,7 @@
     try { await navigator.clipboard.writeText(value); copied = true; } catch (err) { copied = copyThroughTextField(value); }
     toast(copied ? message : "Couldn't copy that here. Select it and copy it by hand.");
   }
-  const REMOVE_LABEL = { issues: "this issue", notebook: "this notebook entry", meetings: "this meeting", parts: "this part", practice: "this run", milestones: "this milestone", phases: "this phase" };
+  const REMOVE_LABEL = { issues: "this issue", notebook: "this notebook entry", meetings: "this meeting", parts: "this part", practice: "this run", scouting: "this observation", milestones: "this milestone", phases: "this phase" };
   /** Asks first. btn, if given, shows it is working. */
   async function removeWithConfirm(coll, id, btn) {
     if (!window.confirm(`Delete ${REMOVE_LABEL[coll]}? This can't be undone.`)) return;
@@ -2185,6 +2190,7 @@
     let el;
     if ((el = q("[data-act]")) && el.dataset.act === "reload") { location.reload(); return; }
     if (!S.ready) return;
+    if (scoutPage.click(e)) return;
     if ((el = q("[data-go]"))) { if (el.hasAttribute("data-clear")) { S.view = "open"; S.sub = ""; } const g = el.dataset.go; if (g === "mine") { S.view = "mine"; S.sub = ""; go("issues"); } else if (g === "issues") { if (S.view === "mine") S.view = "open"; S.sub = ""; go("issues"); } else go(g); return; }
     if ((el = q("[data-sub]"))) { S.sub = el.dataset.sub; S.view = "open"; go("issues"); render(); return; }
     if ((el = q("[data-view-go]"))) { S.view = el.dataset.viewGo; S.sub = ""; go("issues"); return; }
@@ -2321,7 +2327,7 @@
     const k = e.key.toLowerCase();
     if (Date.now() - S.g < 900) {
       S.g = 0;
-      const m = { h: "home", i: "issues", s: "season", n: "notebook", p: "parts", r: "practice", m: "meetings", b: "pit", ",": "settings" }[k];
+      const m = { h: "home", i: "issues", s: "season", n: "notebook", p: "parts", r: "practice", a: "scouting", m: "meetings", b: "pit", ",": "settings" }[k];
       if (m) { e.preventDefault(); go(m); }
       return;
     }
@@ -2343,6 +2349,7 @@
   document.addEventListener("change", async (e) => {
     if (!S.ready) return;
     const t = e.target;
+    if (scoutPage.change(t)) return;
     if (t.matches("[data-field]")) {
       const i = byId(t.dataset.id), f = t.dataset.field;
       if (f === "status") setStatus(i, t.value);
@@ -2456,6 +2463,8 @@
         await enter({ ...S.user, mustChange: false });
       } else if (!S.ready) {
         /* ignore */
+      } else if (scoutPage.ownsForm(f)) {
+        await scoutPage.submit(f, d);
       } else if (f.matches("[data-new]")) {
         const i = await create("issues", { title: d.title.trim(), type: typeFor(d.sub), sub: d.sub, pri: d.pri, status: "todo", who: [d.who], created: F.today, due: d.due || undefined, desc: "" });
         closeModal(); toast(`Created ${ftc(i.id)}.`, "Open", () => openIssue(i.id)); render();

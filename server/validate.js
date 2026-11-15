@@ -80,6 +80,12 @@ export const SPECS = {
     note: str(1000),
     auto: int(0, 10),
   },
+  scouting: {
+    season: int(2015, 2100, true), event: str(80, true), team: int(1, 999999, true),
+    kind: oneOf(["pit", "match"], "pit"), match: str(100), date: date(true),
+    author: str(64), shortlist: bool(), rating: int(1, 5),
+    auto: str(1000), teleop: str(1000), endgame: str(1000), reliability: str(1000), note: str(3000),
+  },
   meetings: {
     date: date(true),
     title: str(200, true),

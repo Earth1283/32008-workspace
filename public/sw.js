@@ -1,7 +1,7 @@
 /* Keeps the app's own files on the device so it opens without a connection. Always prefers the server, so a new
    version shows up on the next load. Team data never passes through here: /api is left to the page. */
-const CACHE = "008-app-v1";
-const APP_FILES = ["/", "/style.css", "/theme.js", "/data.js", "/scoring.js", "/commands.js", "/menu.js", "/csv.js", "/offline.js", "/app.js"];
+const CACHE = "008-app-v2";
+const APP_FILES = ["/", "/style.css", "/theme.js", "/data.js", "/scoring.js", "/commands.js", "/menu.js", "/csv.js", "/offline.js", "/scouting.js", "/app.js"];
 const SLOW_NETWORK_MS = 3000;
 
 self.addEventListener("install", (event) => {

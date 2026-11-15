@@ -9,7 +9,7 @@
     me: null,
     budget: 0,
 
-    people: [], milestones: [], phases: [], issues: [], parts: [], practice: [], meetings: [], notebook: [],
+    people: [], milestones: [], phases: [], issues: [], parts: [], practice: [], meetings: [], notebook: [], scouting: [], scoutEvents: [],
 
     subs: {
       drive: "Drivetrain", intake: "Intake", lift: "Lift", vision: "Vision",

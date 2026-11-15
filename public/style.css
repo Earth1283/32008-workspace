@@ -598,6 +598,70 @@ button.chip.moved { animation: pop .3s var(--spring); }
 #modal > form > .bd { min-height: 0; overflow-y: auto; }
 #modal > form > :not(.bd) { flex-shrink: 0; }
 
+/* Scouting follows the workspace's tables, forms and neutral surfaces. */
+.scout-wrap { max-width: 1320px; width: 100%; min-width: 0; }
+.scout-intro > div, .scout-event > div { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.scout-intro, .scout-event, .scout-toolbar, .scout-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.scout-intro { margin: 10px 0 26px; align-items: flex-end; }
+.scout-intro h2 { font-size: 28px; font-weight: 600; letter-spacing: -.035em; line-height: 1.2; margin: 6px 0; }
+.scout-intro p { margin: 0; }
+.scout-saved { max-width: 360px; min-width: 210px; }
+.scout-search { display: grid; grid-template-columns: 180px 110px minmax(180px, 1fr) 120px auto; align-items: end; gap: 12px; padding: 18px 0; border-block: 1px solid var(--line); }
+.scout-search:not(:has([name=team])) { grid-template-columns: 180px 110px minmax(180px, 1fr) auto; }
+.scout-search label, .scout-saved, .scout-form label { display: flex; flex-direction: column; gap: 6px; color: var(--dim); font-size: 12px; }
+.scout-search .in, .scout-saved .in, .scout-form .in { width: 100%; min-width: 0; }
+.scout-status { margin-block: 14px; }
+.scout-results { max-height: 320px; overflow: auto; border-bottom: 1px solid var(--line); }
+.scout-results .t small { display: block; color: var(--dim); margin-top: 3px; }
+.scout-event { margin-block: 30px 16px; }
+.scout-event h2, .scout-detail h2 { font-size: 22px; font-weight: 600; letter-spacing: -.025em; margin: 0 0 6px; }
+.scout-event p { margin: 4px 0; }
+.scout-event .faint { font-size: 12px; }
+.scout-toolbar { justify-content: flex-start; flex-wrap: wrap; margin: 26px 0 16px; gap: 16px; }
+.scout-toolbar > .avl { margin-left: auto; }
+.scout-star { font-size: 22px; color: var(--dim); line-height: 1; padding: 4px; }
+.scout-star.on { color: var(--brand); }
+.scout-star:disabled { cursor: default; }
+.scout-team-name { text-align: left; display: flex; align-items: baseline; gap: 12px; }
+.scout-team-name b { min-width: 48px; font-variant-numeric: tabular-nums; }
+.scout-team-name:hover { color: var(--brand); }
+.scout-teams { min-width: 660px; }
+.scout-matches { min-width: 600px; }
+.scout-teams td, .scout-matches td { font-variant-numeric: tabular-nums; }
+.scout-detail { margin-top: 30px; }
+.scout-detail-head { margin: 18px 0 24px; }
+.scout-note { padding: 18px 0; border-bottom: 1px solid var(--line); }
+.scout-note-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; }
+.scout-note-head > b { font-size: 13px; }
+.scout-note-head > .linkish { margin-left: auto; }
+.scout-note p { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 75ch; margin: 10px 0 0; }
+.scout-note p > span { display: inline-block; min-width: 80px; font-size: 12px; }
+.scout-form { display: flex; flex-direction: column; gap: 16px; }
+.scout-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.scout-form textarea { resize: vertical; min-height: 58px; }
+.scout-form .scout-check { display: flex; flex-direction: row; align-items: center; align-self: end; padding-block: 8px; gap: 8px; }
+.scout-source { padding-block: 16px; border-bottom: 1px solid var(--line); display: grid; gap: 12px; }
+.scout-source h3 { font-size: 14px; display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 0; }
+.scout-warnings { border-left: 2px solid var(--doing); padding-left: 14px; color: var(--dim); font-size: 12px; }
+.scout-warnings p { margin: 6px 0; }
+@media (max-width: 1100px) {
+  .scout-search, .scout-search:not(:has([name=team])) { grid-template-columns: 1fr 110px 1fr; }
+  .scout-search > .scout-query { grid-column: 1 / -1; grid-row: 2; }
+  .scout-search > button { justify-self: start; }
+  .scout-intro { align-items: flex-start; flex-direction: column; }
+  .scout-saved { width: 100%; max-width: 100%; }
+}
+@media (max-width: 560px) {
+  .scout-header { gap: 6px; padding-block: 8px; }
+  .scout-header h1 { width: 100%; }
+  .scout-header .r { margin-left: 0; flex-wrap: wrap; }
+  .scout-search, .scout-search:not(:has([name=team])) { grid-template-columns: minmax(0, 1fr) 100px; }
+  .scout-search > .scout-query { grid-row: auto; }
+  .scout-event, .scout-detail-head { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .scout-toolbar > .avl { margin-left: 0; }
+  .scout-form-grid { grid-template-columns: 1fr; }
+}
+
 /* Parts scroll within the table instead of widening the whole page. */
 .parts-table table { min-width: 860px; }
 .parts-table td:first-child, .parts-table td:nth-child(8) { overflow-wrap: anywhere; }

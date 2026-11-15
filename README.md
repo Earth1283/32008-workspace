@@ -15,6 +15,7 @@ It runs as a single Node process with a SQLite file. There is nothing to install
 | **Season** | Timeline of phases and milestones with a today marker |
 | **Parts** | Have, ordered and needed counts, spend against a budget |
 | **Practice** | Log full runs, auto-only runs, scrimmages and matches on the season's score sheet. Compares routines and drivers, tracks how often you reach ranking point targets, and turns a problem into an issue in one click |
+| **Scouting** | Find events from four providers, save rosters, rankings and matches, shortlist teams, and share pit and match observations offline |
 | **Meetings** | Agenda, notes, attendees and action items. An action item becomes an issue in one click |
 | **Pit board** | Large type for glancing at from across the pit: countdown, subsystem health, blockers |
 | **Settings** | Profile, team identity and logo, theme and accent color, density, which notifications you get, members and access, GitHub |
@@ -56,6 +57,9 @@ Set these as environment variables.
 | `GEMINI_API_KEY` | unset | Turns on "ask the workspace" (see below). Put it in `.env`, which the server reads at start |
 | `GEMINI_MODEL` | `gemini-flash-lite-latest` | Any Gemini model id that supports structured output |
 | `CONFIG_DIR` | `config/` | Where the ask prompts live |
+| `FIRST_API_USERNAME`, `FIRST_API_TOKEN` | unset | FIRST Events scouting credentials. Also configurable in Scouting, Sources |
+| `TOA_API_KEY` | unset | The Orange Alliance scouting key |
+| `FTC_SCOREKEEPER_URL`, `FTC_SCOREKEEPER_KEY` | unset | Venue scoring server address (without `/api`) and optional Bearer API key |
 
 ## Ask the workspace
 
@@ -78,11 +82,30 @@ Settings, Workspace, Import brings in parts or issues, and the Parts page has th
 
 Imported issues don't send notifications.
 
+## Scouting
+
+Open **Scouting** in the sidebar, or press **G then A**. Choose a source and the season's starting year (2026 for 2026–27), find an event, and press **Load event**. FTCScout and FIRST Events can also find events by team number. Switch between saved events with the dropdown.
+
+| Source | Setup | Data |
+|---|---|---|
+| [FTCScout](https://ftcscout.org) | No key | Event search, team event history, roster, rankings, event OPR and auto OPR, matches |
+| [FIRST Events](https://ftc-events.firstinspires.org/services/API) | API username and token | Official events, rosters, rankings and match results |
+| [The Orange Alliance](https://theorangealliance.org) | X-TOA-Key | Events, rosters, rankings, available OPR and matches |
+| [Venue scorekeeper](https://github.com/FIRST-Tech-Challenge/scorekeeper/wiki/API-Documentation) | Server address; Bearer key if required | Event list and the v2 full-event API: roster, rankings and qualification matches. Requires a compatible scorekeeper version |
+
+Admins connect sources under **Scouting, Sources**, or set the environment variables above. Keys stay on the server and are excluded from state responses and JSON exports. SQLite backups contain them. Blank fields keep existing values; **Disconnect this source** clears its saved configuration, overriding environment defaults. The server must be able to reach the venue scoring computer; a tablet's connection alone is not enough.
+
+Each event snapshot shows its source and fetch time. Refreshing is manual, with a 30-second cache to avoid duplicate requests. A failed match, roster or rankings request keeps the previous section and shows a warning. OPR is a provider's estimate of a team's contribution; match scores are alliance totals. Missing values show a dash. Sources and seasons stay separate; choosing another provider creates a separate snapshot rather than mixing rankings. Use the same event code in observations to share notes across snapshots; TOA keys may differ from FIRST codes.
+
+Click a team for its matches and observations. Record autonomous paths, TeleOp, endgame, reliability, notes and an optional 1–5 partner-fit rating. Use the star or the observation's checkbox to shortlist a team. You can add observations by hand before loading an event. Observations without a selected event are shown for the search form's season.
+
+Saved events can be read offline. Pit visits, match observations and shortlist edits use the same offline queue as the rest of the app. Searching, fetching events and configuring sources need a connection. Viewers can browse and search, but only members, mentors and admins can load events or change observations. **Export observations** downloads the selected event's notes as CSV, or all notes for the selected season when no event is selected.
+
 ## Working offline
 
 Teams can't run Wi-Fi or hotspots at events (rule E301), and venue connections fail, so the app doesn't depend on one.
 
-- Each device keeps a copy of the team's data. Without a connection you can read everything and change issues, notebook entries, practice runs, parts and meetings, and mark inbox items read. The pill in the corner shows how many changes are waiting.
+- Each device keeps a copy of the team's data. Without a connection you can read everything and change issues, notebook entries, practice runs, scouting observations, parts and meetings, and mark inbox items read. The pill in the corner shows how many changes are waiting.
 - Changes go out in order when the server is back. New issues get their real number then, and until that point they show as FTC-new. If a teammate edited the same issue, each field you didn't both change is kept; where you both changed a field, your version wins and you're told. Anything that can't be applied, such as an edit to something a teammate deleted, stays in the list to retry or discard.
 - Settings, members, GitHub, imports and asking the workspace need a connection.
 - **Reopening the app with no connection needs HTTPS.** Browsers only allow the service worker that stores the app on secure addresses. On plain HTTP an open tab still works and syncs later, but closing it or reloading ends the session until you're back online. See [HTTPS](DEPLOYMENT.md#https-with-a-reverse-proxy).
@@ -104,7 +127,7 @@ Admins create accounts (Settings, Members, Add member). Each gets a one-time tem
 | Access | Can do |
 |---|---|
 | **Admin** | Everything, including settings, members, the season and deleting issues |
-| **Member**, **Mentor** | Create and edit issues, notebook entries, parts, practice sessions and meetings |
+| **Member**, **Mentor** | Create and edit issues, notebook entries, parts, practice sessions, scouting observations and meetings; fetch scouting events |
 | **Viewer** | Read everything, change nothing |
 
 Passwords are hashed with scrypt. Sessions are random tokens in an HttpOnly cookie that lasts 30 days. Five failed sign-ins lock that username and address for a minute.
@@ -117,7 +140,7 @@ Passwords are hashed with scrypt. Sessions are random tokens in an HttpOnly cook
 | `C` | New issue |
 | `J` / `K` | Next or previous issue in the list |
 | `1` to `5` | Set the open issue to To do, In progress, In review, Blocked, Done |
-| `G` then `H` `I` `S` `N` `P` `R` `M` `B` `,` | Go to Home, Issues, Season, Notebook, Parts, Practice, Meetings, Pit board, Settings |
+| `G` then `H` `I` `S` `N` `P` `R` `A` `M` `B` `,` | Go to Home, Issues, Season, Notebook, Parts, Practice, Scouting, Meetings, Pit board, Settings |
 | `Esc` | Close a panel, dialog or the pit board |
 
 ## Operating it
@@ -140,18 +163,20 @@ server/   server.js   entry point
           auth.js     password hashing, tokens, login throttle
           notify.js   the inbox: who hears about what, due-date and digest checks
           github.js   pull request sync
+          scouting.js external event providers and saved scouting snapshots
           admin.js    operator commands
           demo.js     sample data loader
 public/   the app, with no build step: index.html, app.js, data.js, style.css, theme.js
           scoring.js  season score sheets, also used by the server
           csv.js      reading spreadsheets
           offline.js  the saved copy and the queue of waiting changes
+          scouting.js scouting page, team profiles and observation forms
           sw.js       keeps the app's own files on the device
 test/     API tests and end-to-end UI tests
 data/     SQLite files (git-ignored)
 ```
 
-Each collection (issues, notebook, parts, practice, meetings, milestones, phases) is stored as JSON documents in one table. The frontend is plain JavaScript with no framework and no bundler. The server uses only Node's standard library plus its built-in `node:sqlite`. `jsdom` is the single dev dependency, used by the UI tests.
+Each collection (issues, notebook, parts, practice, scouting, meetings, milestones, phases, and fetched scoutEvents) is stored as JSON documents in one table. The frontend is plain JavaScript with no framework and no bundler. The server uses only Node's standard library plus its built-in `node:sqlite`. `jsdom` is the single dev dependency, used by the UI tests.
 
 ### API
 
@@ -161,7 +186,10 @@ All routes are under `/api` and need a session, except `session`, `login` and `s
 |---|---|
 | `GET /session`, `POST /login`, `POST /logout`, `POST /setup`, `POST /password` | Sessions and first-run setup |
 | `GET /state` | Everything the app needs, in one response |
-| `POST /<collection>`, `PUT /<collection>/<id>`, `DELETE /<collection>/<id>` | Create, replace, delete. A `POST` may carry a client-made `cid`, and repeating it returns the first result instead of creating a second record. Collections: `issues`, `notebook`, `practice`, `meetings`, `parts`, `milestones`, `phases`. Every record carries a `rev`. Send it back with a `PUT` and the save is refused with `409` and the current copy if someone saved first; leave it out and last write wins |
+| `POST /<collection>`, `PUT /<collection>/<id>`, `DELETE /<collection>/<id>` | Create, replace, delete. A `POST` may carry a client-made `cid`, and repeating it returns the first result instead of creating a second record. Collections: `issues`, `notebook`, `practice`, `scouting`, `meetings`, `parts`, `milestones`, `phases`. Every record carries a `rev`. Send it back with a `PUT` and the save is refused with `409` and the current copy if someone saved first; leave it out and last write wins |
+| `GET /scouting/search?source=…&season=…&q=…&team=…` | Find events. Sources: `ftcscout`, `first`, `toa`, `venue`; team filtering is supported by FTCScout and FIRST |
+| `POST /scouting/sync` | Save or refresh `{ "source": "ftcscout", "season": 2026, "key": "CNHAQ1" }` (member). Snapshots come with `/state` as `scoutEvents` |
+| `PUT /scouting/config` | Update source credentials (admin). Returns configuration status only; omitted fields keep their values |
 | `PUT /meta/team`, `PUT /meta/settings` | Team identity and settings (admin) |
 | `PATCH /people/<id>` | Your own name and role, or anyone's if admin |
 | `POST /users`, `PATCH /users/<id>`, `POST /users/<id>/reset` | Members and access (admin) |

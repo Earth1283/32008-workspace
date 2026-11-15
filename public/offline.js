@@ -137,7 +137,7 @@
         for (const op of read()) {
           if (op.type === "read") {
             for (const note of out.inbox ?? []) if (op.ids === "all" || op.ids.includes(note.id)) note.read = true;
-          } else if (op.type === "create") out[op.coll].push({ ...clone(op.doc), id: op.target, rev: 0 });
+          } else if (op.type === "create") (out[op.coll] ??= []).push({ ...clone(op.doc), id: op.target, rev: 0 });
           else if (op.type === "save") out[op.coll] = out[op.coll].map((doc) => (same(doc.id, op.target) ? clone(op.doc) : doc));
           else out[op.coll] = out[op.coll].filter((doc) => !same(doc.id, op.target));
         }

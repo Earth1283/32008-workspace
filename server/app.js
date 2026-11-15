@@ -9,12 +9,14 @@ import { seedDemo, DEMO_PASSWORD } from "./demo.js";
 import { makeNotifier, localDate } from "./notify.js";
 import { makeGithub } from "./github.js";
 import { makeAsk } from "./ask.js";
+import { makeScouting } from "./scouting.js";
 
 const SESSION_SECONDS = 30 * 24 * 3600;
 const DOC_COLLS = {
   issues:     { write: "member", del: "admin" },
   notebook:   { write: "member", del: "member" },
   practice:   { write: "member", del: "member" },
+  scouting:   { write: "member", del: "member" },
   meetings:   { write: "member", del: "member" },
   parts:      { write: "member", del: "member" },
   milestones: { write: "admin", del: "admin" },
@@ -63,7 +65,7 @@ function readJson(req, limit = 1_000_000) {
 const hueOf = (s) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
 const today = () => localDate();
 
-export function createApp({ dbPath = "data/008.db", publicDir, demo = false, trustProxy = false, githubFetch, githubApi, githubPollMs = 180_000, geminiKey = "", geminiModel = "", geminiFetch, askLimits, configDir = "" } = {}) {
+export function createApp({ dbPath = "data/008.db", publicDir, demo = false, trustProxy = false, githubFetch, githubApi, githubPollMs = 180_000, geminiKey = "", geminiModel = "", geminiFetch, askLimits, configDir = "", scoutingFetch, scoutingConfig } = {}) {
   const db = openDb(dbPath);
   const store = makeStore(db);
   const throttle = makeThrottle();
@@ -86,6 +88,7 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
   const notifier = makeNotifier({ db, store, push });
   const github = makeGithub({ db, store, notifier, broadcast, fetch: githubFetch, api: githubApi });
   const ask = makeAsk({ store, key: geminiKey, model: geminiModel, configDir, fetch: geminiFetch, ...askLimits });
+  const scouting = makeScouting({ store, fetch: scoutingFetch, config: scoutingConfig });
   const safely = (fn) => () => { try { const r = fn(); if (r && r.catch) r.catch((e) => console.error(e)); } catch (e) { console.error(e); } };
 
   const purge = () => {
@@ -179,6 +182,7 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
   const prepareDoc = (coll, doc, before, who) => {
     if (coll === "practice") checkRun(doc);
     if (coll === "notebook") doc.log = notebookLog(before, doc, who);
+    if (coll === "scouting") doc.author = before?.author || who;
   };
 
   const adminCount = () => db.prepare("SELECT COUNT(*) AS n FROM users WHERE access = 'Admin'").get().n;
@@ -201,6 +205,8 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
     out.inbox = notifier.list(user.id);
     out.ask = ask.enabled;
     out.github = { ...store.meta("githubStatus", {}), hasToken: !!store.meta("github", {}).token };
+    out.scoutingSources = scouting.status();
+    out.scoutEvents = store.list("scoutEvents");
     return out;
   }
 
@@ -291,10 +297,28 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
       return json(res, 200, await ask.ask(user.id, body.q));
     }
 
+    if (a === "scouting" && b === "search" && m === "GET") {
+      return json(res, 200, await scouting.search(url.searchParams.get("source"), url.searchParams.get("season"), url.searchParams.get("q") || "", url.searchParams.get("team") || ""));
+    }
+    if (a === "scouting" && b === "sync" && m === "POST") {
+      need(user, "member");
+      const body = await readJson(req, 4000);
+      const saved = await scouting.sync(body.source, body.season, body.key, user.id);
+      broadcast("scoutEvents", req.headers["x-client"]);
+      return json(res, 200, saved);
+    }
+    if (a === "scouting" && b === "config" && m === "PUT") {
+      need(user, "admin");
+      const sources = scouting.configure(await readJson(req, 6000));
+      broadcast("scoutingSources", req.headers["x-client"]);
+      return json(res, 200, sources);
+    }
+
     if (a === "export" && m === "GET") {
       need(user, "admin");
       const docs = {};
       for (const c of [...Object.keys(DOC_COLLS), "people"]) docs[c] = store.list(c);
+      docs.scoutEvents = store.list("scoutEvents");
       const body = { version: 1, exportedAt: new Date().toISOString(), meta: { team: store.meta("team"), settings: store.meta("settings"), nextIssue: store.meta("nextIssue", 1) },
         users: db.prepare("SELECT id, username, access FROM users").all(), docs };
       const s = JSON.stringify(body, null, 1);
@@ -505,12 +529,13 @@ export function createApp({ dbPath = "data/008.db", publicDir, demo = false, tru
   });
 
   return {
-    server, db, store, demoLogins, notifier, github,
+    server, db, store, demoLogins, notifier, github, scouting,
     async close() {
       closing = true;
       timers.forEach(clearInterval);
       for (const c of clients.keys()) c.end();
       await github.idle();
+      await scouting.idle();
       const stopped = new Promise((r) => server.close(r));
       server.closeAllConnections?.();
       await stopped;

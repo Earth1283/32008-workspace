@@ -15,7 +15,9 @@ const poll = Number(process.env.GITHUB_POLL_SECONDS ?? 180);
 const githubPollMs = poll > 0 ? Math.max(60, poll) * 1000 : 0;
 
 const app = createApp({ dbPath, publicDir: join(root, "public"), demo, trustProxy: process.env.TRUST_PROXY === "1", githubPollMs, configDir,
-  geminiKey: process.env.GEMINI_API_KEY ?? "", geminiModel: process.env.GEMINI_MODEL ?? "" });
+  geminiKey: process.env.GEMINI_API_KEY ?? "", geminiModel: process.env.GEMINI_MODEL ?? "",
+  scoutingConfig: { firstUsername: process.env.FIRST_API_USERNAME ?? "", firstToken: process.env.FIRST_API_TOKEN ?? "",
+    toaKey: process.env.TOA_API_KEY ?? "", venueUrl: process.env.FTC_SCOREKEEPER_URL ?? "", venueKey: process.env.FTC_SCOREKEEPER_KEY ?? "" } });
 
 app.server.listen(port, host, () => {
   const lan = Object.values(networkInterfaces()).flat().find((n) => n && n.family === "IPv4" && !n.internal)?.address;

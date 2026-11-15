@@ -68,7 +68,7 @@
     const NEXT_STATUS = { todo: "doing", doing: "review", review: "done", blocked: "doing" };
     const STATUS_ALIASES = { todo: ["to do"], doing: ["doing", "started"], review: ["review"], blocked: [], done: ["finished"] };
     const PAGES = [["home", "Home"], ["inbox", "Inbox"], ["mine", "My issues"], ["issues", "Issues"], ["season", "Season", ["calendar", "timeline"]], ["notebook", "Notebook"],
-      ["parts", "Parts"], ["practice", "Practice"], ["meetings", "Meetings"], ["pit", "Pit board", ["pit"]], ["settings", "Settings", ["preferences"]]];
+      ["parts", "Parts"], ["practice", "Practice"], ["scouting", "Scouting", ["scout", "opponents", "alliance"]], ["meetings", "Meetings"], ["pit", "Pit board", ["pit"]], ["settings", "Settings", ["preferences"]]];
     const currentOr = (value, current) => (value === current ? "Current" : "");
 
     const firstName = (person) => person.name.split(" ")[0];
